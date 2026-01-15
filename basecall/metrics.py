@@ -116,7 +116,7 @@ def ctc_crf_decode(
     blank_idx: int = BLANK_IDX,
 ) -> List[List[int]]:
     try:
-        import ctc_crf  # type: ignore
+        from . import ctc_crf  # type: ignore
     except Exception as exc:
         raise ImportError(
             "ctc-crf decoder requested but ctc_crf is not installed. "
@@ -154,7 +154,7 @@ def ctc_crf_loss(
     blank_idx: int = BLANK_IDX,
 ) -> torch.Tensor:
     try:
-        import ctc_crf  # type: ignore
+        from . import ctc_crf  # type: ignore
     except Exception as exc:
         raise ImportError(
             "ctc-crf loss requested but ctc_crf is not installed. "

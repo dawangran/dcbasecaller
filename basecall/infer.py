@@ -17,9 +17,9 @@ from typing import List, Tuple, Dict, Any, Iterable
 import torch
 from tqdm import tqdm
 
-from model import BasecallModel
-from utils import ID2BASE, BLANK_IDX, seed_everything
-from metrics import ctc_decode
+from .model import BasecallModel
+from .utils import ID2BASE, BLANK_IDX, seed_everything
+from .metrics import ctc_decode
 
 # --------------------------
 # Bonito-style Q-score (CTC)

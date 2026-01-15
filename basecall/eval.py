@@ -30,11 +30,11 @@ import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from data_multifolder import scan_pair_files, MultiFolderSignalRefDataset, create_collate_fn
-from metrics import ctc_decode, batch_pbma, cal_per_base_match_accuracy
-from model import BasecallModel
-from utils import BLANK_IDX, ID2BASE, seed_everything
-from callback import plot_alignment_heatmap, plot_aligned_heatmap_png, align_sequences_indel_aware
+from .data_multifolder import scan_pair_files, MultiFolderSignalRefDataset, create_collate_fn
+from .metrics import ctc_decode, batch_pbma, cal_per_base_match_accuracy
+from .model import BasecallModel
+from .utils import BLANK_IDX, ID2BASE, seed_everything
+from .callback import plot_alignment_heatmap, plot_aligned_heatmap_png, align_sequences_indel_aware
 
 
 def _parse_cigar(cigar: str) -> List[str]:

@@ -4,11 +4,18 @@ This repo provides training, evaluation, and inference utilities for a CTC-based
 The core workflow is:
 
 1. **Prepare data** as paired `tokens_*.npy` and `reference_*.npy` files.
-2. **Train** with `train_ddp_multifolder.py`.
-3. **Evaluate** with `eval.py`.
-4. **Infer** from fast5 with `infer.py`.
+2. **Install** this package (`pip install -e .`) and use the console scripts.
+3. **Train** with `basecall-train`.
+4. **Evaluate** with `basecall-eval`.
+5. **Infer** from JSONL with `basecall-infer`.
 
 ---
+
+## Installation
+
+```bash
+pip install -e .
+```
 
 ## 1) Data Format
 
@@ -32,7 +39,7 @@ The script looks for pairs by replacing `tokens_` with `reference_` and keeping 
 ### Basic usage (auto split)
 
 ```bash
-python train_ddp_multifolder.py \
+basecall-train \
   --data_folders /path/to/data1,/path/to/data2 \
   --model_name_or_path <hf-model> \
   --output_dir outputs
@@ -41,7 +48,7 @@ python train_ddp_multifolder.py \
 ### Use explicit train/val/test folders (skip auto split)
 
 ```bash
-python train_ddp_multifolder.py \
+basecall-train \
   --train_folders /path/to/train \
   --val_folders /path/to/val \
   --test_folders /path/to/test \
@@ -99,7 +106,7 @@ python train_ddp_multifolder.py \
 ### Basic usage (single folder)
 
 ```bash
-python eval.py \
+basecall-eval \
   --data_folder /path/to/data \
   --model_name_or_path <hf-model> \
   --ckpt ckpt_best.pt \
@@ -140,7 +147,7 @@ python eval.py \
 ## 4) Inference (jsonl -> fastq)
 
 ```bash
-python infer.py \
+basecall-infer \
   --ckpt ckpt_best.pt \
   --model_name_or_path <hf-model> \
   --jsonl_gz reads.jsonl.gz \
@@ -183,31 +190,31 @@ python infer.py \
 ## 5.1) Inspect checkpoint head config
 
 ```bash
-python inspect_ckpt.py --ckpt ckpt_best.pt
+basecall-inspect --ckpt ckpt_best.pt
 ```
 
-This prints inferred head settings and suggested `eval.py`/`infer.py` flags.
+This prints inferred head settings and suggested `basecall-eval`/`basecall-infer` flags.
 
 ## 6) Minimal runnable demo
 
 ```bash
 # 1) Train (auto split)
-python train_ddp_multifolder.py \
+basecall-train \
   --data_folders /path/to/data \
   --model_name_or_path <hf-model> \
   --output_dir outputs
 
 # 2) Evaluate
-python eval.py \
+basecall-eval \
   --data_folder /path/to/data \
   --model_name_or_path <hf-model> \
   --ckpt outputs/ckpt_last.pt \
   --decoder greedy
 
-# 3) Infer (fast5 -> fastq)
-python infer.py \
+# 3) Infer (JSONL -> fastq)
+basecall-infer \
   --ckpt outputs/ckpt_last.pt \
   --model_name_or_path <hf-model> \
-  --fast5 sample.fast5 \
+  --jsonl_gz reads.jsonl.gz \
   --out out.fastq
 ```

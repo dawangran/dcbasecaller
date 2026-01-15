@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "basecall"
+version = "0.1.0"
+description = "CTC-based basecalling utilities for training, evaluation, and inference."
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+  "numpy",
+  "torch",
+  "transformers",
+  "tqdm",
+  "edlib",
+  "matplotlib",
+]
+
+[project.scripts]
+basecall-train = "basecall.train_ddp_multifolder:main"
+basecall-eval = "basecall.eval:main"
+basecall-infer = "basecall.infer:main"
+basecall-inspect = "basecall.inspect_ckpt:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["basecall*"]
