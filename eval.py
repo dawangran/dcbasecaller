@@ -1,0 +1,436 @@
+# -*- coding: utf-8 -*-
+"""
+eval.py
+
+Evaluate a single folder of tokens/reference pairs and report PBMA + error type proportions.
+Also export alignment heatmaps for a few reads.
+
+Example:
+  python eval.py \
+    --data_folder /path/to/data \
+    --model_name_or_path your_hf_model \
+    --ckpt ckpt_best.pt \
+    --decoder greedy \
+    --batch_size 8 \
+    --out_dir eval_out \
+    --num_visualize 8 \
+    --max_len 200
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+from typing import Dict, List, Tuple
+
+import edlib
+import numpy as np
+import torch
+from torch.utils.data import DataLoader
+from tqdm import tqdm
+
+from data_multifolder import scan_pair_files, MultiFolderSignalRefDataset, create_collate_fn
+from metrics import ctc_decode, batch_pbma, cal_per_base_match_accuracy
+from model import BasecallModel
+from utils import BLANK_IDX, ID2BASE, seed_everything
+from callback import plot_alignment_heatmap, plot_aligned_heatmap_png, align_sequences_indel_aware
+
+
+def _parse_cigar(cigar: str) -> List[str]:
+    ops = []
+    num = ""
+    for ch in cigar:
+        if ch.isdigit():
+            num += ch
+        else:
+            n = int(num) if num else 1
+            ops.extend([ch] * n)
+            num = ""
+    return ops
+
+
+def error_counts(pred_seq: str, ref_seq: str) -> Dict[str, int]:
+    result = edlib.align(pred_seq, ref_seq, task="path")
+    cigar = result.get("cigar", "")
+    ops = _parse_cigar(cigar) if cigar else []
+    counts = {"match": 0, "mismatch": 0, "ins": 0, "del": 0}
+    for op in ops:
+        if op == "=":
+            counts["match"] += 1
+        elif op == "X":
+            counts["mismatch"] += 1
+        elif op == "I":
+            counts["ins"] += 1
+        elif op == "D":
+            counts["del"] += 1
+    return counts
+
+
+def merge_counts(total: Dict[str, int], item: Dict[str, int]) -> Dict[str, int]:
+    for k in total:
+        total[k] += item.get(k, 0)
+    return total
+
+
+def counts_to_ratio(counts: Dict[str, int]) -> Dict[str, float]:
+    denom = sum(counts.values())
+    if denom == 0:
+        return {k: 0.0 for k in counts}
+    return {k: float(v) / float(denom) for k, v in counts.items()}
+
+
+def _normalize_base(ch: str) -> str:
+    ch = (ch or "N").upper()
+    if ch in {"A", "T", "G", "C"}:
+        return ch
+    return "N"
+
+
+def _init_base_counts() -> Dict[str, int]:
+    return {"A": 0, "T": 0, "G": 0, "C": 0, "N": 0}
+
+
+def _init_mismatch_matrix() -> Dict[str, Dict[str, int]]:
+    return {b: _init_base_counts() for b in ("A", "T", "G", "C", "N")}
+
+
+def update_error_patterns(
+    true_seq: str,
+    pred_seq: str,
+    mismatch_matrix: Dict[str, Dict[str, int]],
+    deletion_bases: Dict[str, int],
+    insertion_bases: Dict[str, int],
+) -> None:
+    true_aln, pred_aln = align_sequences_indel_aware(true_seq, pred_seq)
+    L = min(len(true_aln), len(pred_aln))
+    for i in range(L):
+        t = _normalize_base(true_aln[i])
+        p = _normalize_base(pred_aln[i])
+        if true_aln[i] == "-" and pred_aln[i] != "-":
+            insertion_bases[p] += 1
+        elif true_aln[i] != "-" and pred_aln[i] == "-":
+            deletion_bases[t] += 1
+        elif true_aln[i] != "-" and pred_aln[i] != "-" and t != p:
+            mismatch_matrix[t][p] += 1
+
+
+def init_length_bins() -> List[int]:
+    return [0, 50, 100, 200, 400, 800, 1200, 2000, 3000, 5000, 10000]
+
+
+def count_hist(values: List[int], bins: List[int]) -> Dict[str, int]:
+    hist = {}
+    for i in range(len(bins) - 1):
+        start = bins[i]
+        end = bins[i + 1]
+        hist[f"{start}-{end}"] = 0
+    hist[f">={bins[-1]}"] = 0
+    for v in values:
+        placed = False
+        for i in range(len(bins) - 1):
+            if bins[i] <= v < bins[i + 1]:
+                hist[f"{bins[i]}-{bins[i + 1]}"] += 1
+                placed = True
+                break
+        if not placed:
+            hist[f">={bins[-1]}"] += 1
+    return hist
+
+
+def init_position_bins() -> List[float]:
+    return [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+
+
+def count_relative_positions(values: List[float], bins: List[float]) -> Dict[str, int]:
+    hist = {}
+    for i in range(len(bins) - 1):
+        start = int(bins[i] * 100)
+        end = int(bins[i + 1] * 100)
+        hist[f"{start}-{end}%"] = 0
+    for v in values:
+        for i in range(len(bins) - 1):
+            if bins[i] <= v < bins[i + 1]:
+                key = f"{int(bins[i] * 100)}-{int(bins[i + 1] * 100)}%"
+                hist[key] += 1
+                break
+    return hist
+
+
+def collect_deletion_positions(true_seq: str, pred_seq: str, out: List[float]) -> None:
+    true_aln, pred_aln = align_sequences_indel_aware(true_seq, pred_seq)
+    ref_pos = 0
+    ref_len = sum(1 for ch in true_aln if ch != "-")
+    if ref_len <= 0:
+        return
+    for t_char, p_char in zip(true_aln, pred_aln):
+        if t_char != "-":
+            ref_pos += 1
+        if t_char != "-" and p_char == "-":
+            rel = min(max((ref_pos - 1) / ref_len, 0.0), 1.0)
+            out.append(rel)
+
+
+def load_checkpoint_state(path: str) -> Dict[str, torch.Tensor]:
+    state = torch.load(path, map_location="cpu")
+    if isinstance(state, dict):
+        for key in ("model_state_dict", "state_dict", "model"):
+            if key in state and isinstance(state[key], dict):
+                return state[key]
+    if isinstance(state, dict) and all(isinstance(k, str) for k in state.keys()):
+        return state
+    raise ValueError(f"Unsupported checkpoint format: {path}")
+
+
+def _infer_head_layers(state_dict: Dict[str, torch.Tensor], default_layers: int) -> int:
+    indices = set()
+    for key in state_dict.keys():
+        if key.startswith("base_head.blocks."):
+            parts = key.split(".")
+            if len(parts) > 2 and parts[2].isdigit():
+                indices.add(int(parts[2]))
+    if not indices:
+        return default_layers
+    return max(indices) + 1
+
+
+def _infer_kernel_size(state_dict: Dict[str, torch.Tensor], default_kernel: int) -> int:
+    weight = state_dict.get("base_head.blocks.0.0.weight")
+    if isinstance(weight, torch.Tensor) and weight.dim() == 3:
+        return int(weight.shape[-1])
+    return default_kernel
+
+
+def _infer_use_pointwise(state_dict: Dict[str, torch.Tensor], default_value: bool) -> bool:
+    if "base_head.blocks.0.1.weight" in state_dict:
+        return True
+    if any(key.startswith("base_head.blocks.") and ".1.weight" in key for key in state_dict):
+        return True
+    return default_value
+
+
+def _infer_transformer_layers(state_dict: Dict[str, torch.Tensor]) -> int:
+    indices = set()
+    for key in state_dict.keys():
+        if key.startswith("base_head.transformer.layers."):
+            parts = key.split(".")
+            if len(parts) > 3 and parts[3].isdigit():
+                indices.add(int(parts[3]))
+    if not indices:
+        return 0
+    return max(indices) + 1
+
+
+def _resolve_head_config(state_dict: Dict[str, torch.Tensor]) -> Dict[str, object]:
+    head_layers = _infer_head_layers(state_dict, default_layers=2)
+    head_kernel_size = _infer_kernel_size(state_dict, default_kernel=5)
+    head_use_pointwise = _infer_use_pointwise(state_dict, default_value=True)
+
+    inferred_transformer_layers = _infer_transformer_layers(state_dict)
+    head_transformer_layers = inferred_transformer_layers
+    head_use_transformer = inferred_transformer_layers > 0
+    head_transformer_heads = 4
+    return {
+        "head_layers": int(head_layers),
+        "head_kernel_size": int(head_kernel_size),
+        "head_use_pointwise": bool(head_use_pointwise),
+        "head_use_transformer": bool(head_use_transformer),
+        "head_transformer_layers": int(head_transformer_layers),
+        "head_transformer_heads": int(head_transformer_heads),
+    }
+
+
+@torch.no_grad()
+def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--data_folder", required=True)
+    ap.add_argument("--model_name_or_path", required=True)
+    ap.add_argument("--ckpt", required=True)
+    ap.add_argument("--decoder", choices=["greedy", "beam", "crf"], default="greedy")
+    ap.add_argument("--beam_width", type=int, default=5)
+    ap.add_argument("--batch_size", type=int, default=4)
+    ap.add_argument("--num_workers", type=int, default=0)
+    ap.add_argument("--out_dir", type=str, default="eval_out")
+    ap.add_argument("--num_visualize", type=int, default=100)
+    ap.add_argument("--max_len", type=int, default=200)
+    ap.add_argument("--fastq_out", type=str, default=None)
+    ap.add_argument("--fastq_q", type=int, default=20)
+    ap.add_argument("--hidden_layer", type=int, default=-1)
+    args = ap.parse_args()
+
+    seed_everything(42)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    use_amp = device.type == "cuda"
+
+    pair_files = scan_pair_files([args.data_folder], group_by="file", recursive=False)
+    if not pair_files:
+        raise ValueError(f"No paired files found under: {args.data_folder}")
+
+    state_dict = load_checkpoint_state(args.ckpt)
+    head_config = _resolve_head_config(state_dict)
+    model = BasecallModel(
+        model_path=args.model_name_or_path,
+        hidden_layer=args.hidden_layer,
+        head_kernel_size=head_config["head_kernel_size"],
+        head_layers=head_config["head_layers"],
+        head_use_pointwise=head_config["head_use_pointwise"],
+        head_use_transformer=head_config["head_use_transformer"],
+        head_transformer_layers=head_config["head_transformer_layers"],
+        head_transformer_heads=head_config["head_transformer_heads"],
+    ).to(device)
+    model.load_state_dict(state_dict, strict=False)
+    model.eval()
+
+    dataset = MultiFolderSignalRefDataset(pair_files)
+    collate_fn = create_collate_fn(model.tokenizer)
+    loader = DataLoader(
+        dataset,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=args.num_workers,
+        collate_fn=collate_fn,
+    )
+
+    total_counts = {"match": 0, "mismatch": 0, "ins": 0, "del": 0}
+    pbma_scores: List[float] = []
+    per_read_pbma: List[float] = []
+    exact_match = 0
+    pred_seq_samples: List[str] = []
+    ref_seq_samples: List[str] = []
+    mismatch_matrix = _init_mismatch_matrix()
+    deletion_bases = _init_base_counts()
+    insertion_bases = _init_base_counts()
+    pred_lengths: List[int] = []
+    ref_lengths: List[int] = []
+    deletion_positions: List[float] = []
+    fastq_handle = None
+    if args.fastq_out:
+        os.makedirs(os.path.dirname(args.fastq_out) or ".", exist_ok=True)
+        fastq_handle = open(args.fastq_out, "w", encoding="utf-8")
+
+    read_idx = 0
+    for batch in tqdm(loader, desc="[eval]", unit="batch"):
+        input_ids = batch["input_ids"].to(device)
+        attention_mask = batch.get("attention_mask")
+        if attention_mask is not None:
+            attention_mask = attention_mask.to(device)
+
+        with torch.cuda.amp.autocast(enabled=use_amp):
+            logits_btc = model(input_ids, attention_mask=attention_mask)
+
+        logits_tbc = logits_btc.transpose(0, 1)
+        pred_ids = ctc_decode(
+            logits_tbc,
+            decoder=args.decoder,
+            beam_width=args.beam_width,
+            blank_idx=BLANK_IDX,
+        )
+        ref_ids = batch["target_seqs"]
+
+        pbma = batch_pbma(pred_ids, ref_ids)
+        pbma_scores.append(pbma)
+
+        for pred, ref in zip(pred_ids, ref_ids):
+            read_idx += 1
+            pred_seq = "".join(ID2BASE.get(i, "N") for i in pred)
+            ref_seq = "".join(ID2BASE.get(i, "N") for i in ref)
+            counts = error_counts(pred_seq, ref_seq)
+            total_counts = merge_counts(total_counts, counts)
+            pbma_read = cal_per_base_match_accuracy(pred_seq, ref_seq)
+            per_read_pbma.append(pbma_read)
+            pred_lengths.append(len(pred_seq))
+            ref_lengths.append(len(ref_seq))
+            update_error_patterns(
+                true_seq=ref_seq,
+                pred_seq=pred_seq,
+                mismatch_matrix=mismatch_matrix,
+                deletion_bases=deletion_bases,
+                insertion_bases=insertion_bases,
+            )
+            collect_deletion_positions(
+                true_seq=ref_seq,
+                pred_seq=pred_seq,
+                out=deletion_positions,
+            )
+            if pred_seq == ref_seq:
+                exact_match += 1
+            if len(pred_seq_samples) < args.num_visualize:
+                pred_seq_samples.append(pred_seq)
+                ref_seq_samples.append(ref_seq)
+            if fastq_handle is not None:
+                q_char = chr(max(0, min(args.fastq_q, 93)) + 33)
+                qstr = q_char * len(pred_seq)
+                fastq_handle.write(f"@read_{read_idx}\n{pred_seq}\n+\n{qstr}\n")
+
+    pbma_avg = float(np.mean(pbma_scores)) if pbma_scores else 0.0
+    ratios = counts_to_ratio(total_counts)
+
+    out_dir = args.out_dir
+    os.makedirs(out_dir, exist_ok=True)
+    length_bins = init_length_bins()
+    position_bins = init_position_bins()
+    summary = {
+        "pbma": pbma_avg,
+        "read_level_pbma": float(np.mean(per_read_pbma)) if per_read_pbma else 0.0,
+        "read_exact_match_rate": exact_match / max(len(per_read_pbma), 1),
+        "counts": total_counts,
+        "ratios": ratios,
+        "mismatch_matrix": mismatch_matrix,
+        "deletion_bases": deletion_bases,
+        "insertion_bases": insertion_bases,
+        "lengths": {
+            "pred": count_hist(pred_lengths, length_bins),
+            "ref": count_hist(ref_lengths, length_bins),
+            "bins": length_bins,
+        },
+        "deletion_position": {
+            "relative_bins": count_relative_positions(deletion_positions, position_bins),
+            "bin_edges": position_bins,
+        },
+        "num_reads": len(dataset),
+    }
+    summary_path = os.path.join(out_dir, "metrics.json")
+    with open(summary_path, "w", encoding="utf-8") as f:
+        json.dump(summary, f, indent=2, ensure_ascii=False)
+
+    if fastq_handle is not None:
+        fastq_handle.close()
+
+    if pred_seq_samples and ref_seq_samples:
+        fig = plot_alignment_heatmap(
+            pred_seq_samples,
+            ref_seq_samples,
+            max_reads=len(pred_seq_samples),
+            max_len=args.max_len,
+        )
+        heatmap_path = os.path.join(out_dir, "heatmap.png")
+        fig.savefig(heatmap_path, dpi=200, bbox_inches="tight")
+
+        per_read_dir = os.path.join(out_dir, "aligned_reads")
+        for idx, (pred_seq, ref_seq) in enumerate(zip(pred_seq_samples, ref_seq_samples), start=1):
+            out_png = os.path.join(per_read_dir, f"read_{idx:03d}.png")
+            title = f"read {idx}"
+            plot_aligned_heatmap_png(
+                true_seq=ref_seq,
+                pred_seq=pred_seq,
+                out_png=out_png,
+                title=title,
+                max_len=args.max_len,
+            )
+
+        seqs_path = os.path.join(out_dir, "sequences.jsonl")
+        with open(seqs_path, "w", encoding="utf-8") as f:
+            for idx, (pred_seq, ref_seq) in enumerate(zip(pred_seq_samples, ref_seq_samples), start=1):
+                record = {
+                    "index": idx,
+                    "pred_seq": pred_seq,
+                    "ref_seq": ref_seq,
+                }
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    print(json.dumps(summary, indent=2, ensure_ascii=False))
+    print(f"[OK] metrics saved: {summary_path}")
+
+
+if __name__ == "__main__":
+    main()
