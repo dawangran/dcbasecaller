@@ -30,7 +30,13 @@ import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from .data_multifolder import scan_jsonl_files, MultiJsonlSignalRefDataset, create_collate_fn
+from .data_multifolder import (
+    scan_jsonl_files,
+    MultiJsonlSignalRefDataset,
+    scan_npy_pairs,
+    MultiNpySignalRefDataset,
+    create_collate_fn,
+)
 from .metrics import ctc_decode, batch_pbma, cal_per_base_match_accuracy
 from .model import BasecallModel
 from .utils import BLANK_IDX, ID2BASE, seed_everything
@@ -258,8 +264,12 @@ def _resolve_head_config(state_dict: Dict[str, torch.Tensor]) -> Dict[str, objec
 @torch.no_grad()
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--jsonl_paths", required=True,
+    ap.add_argument("--jsonl_paths", default=None,
                     help="Comma-separated .jsonl.gz files or folders (uses text/bases fields).")
+    ap.add_argument("--npy_paths", default=None,
+                    help="Comma-separated folders or tokens_*.npy/reference_*.npy files (uses token/reference pairs).")
+    ap.add_argument("--recursive", action="store_true",
+                    help="Scan subfolders for .jsonl.gz or tokens/reference .npy inputs.")
     ap.add_argument("--model_name_or_path", required=True)
     ap.add_argument("--ckpt", required=True)
     ap.add_argument("--decoder", choices=["greedy", "beam", "crf"], default="greedy")
@@ -278,11 +288,23 @@ def main() -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     use_amp = device.type == "cuda"
 
-    jsonl_paths = _parse_path_list(args.jsonl_paths)
-    jsonl_files = scan_jsonl_files(jsonl_paths, group_by="file", recursive=False)
-    if not jsonl_files:
-        raise ValueError(f"No jsonl files found under: {args.jsonl_paths}")
-    dataset = MultiJsonlSignalRefDataset(jsonl_files)
+    if args.jsonl_paths and args.npy_paths:
+        raise ValueError("Do not mix jsonl inputs with tokens/reference npy inputs in the same run.")
+
+    if args.npy_paths:
+        npy_paths = _parse_path_list(args.npy_paths)
+        npy_pairs = scan_npy_pairs(npy_paths, group_by="file", recursive=args.recursive)
+        if not npy_pairs:
+            raise ValueError(f"No tokens/reference npy files found under: {args.npy_paths}")
+        dataset = MultiNpySignalRefDataset(npy_pairs)
+    else:
+        if not args.jsonl_paths:
+            raise ValueError("Provide --jsonl_paths or --npy_paths.")
+        jsonl_paths = _parse_path_list(args.jsonl_paths)
+        jsonl_files = scan_jsonl_files(jsonl_paths, group_by="file", recursive=args.recursive)
+        if not jsonl_files:
+            raise ValueError(f"No jsonl files found under: {args.jsonl_paths}")
+        dataset = MultiJsonlSignalRefDataset(jsonl_files)
 
     state_dict = load_checkpoint_state(args.ckpt)
     head_config = _resolve_head_config(state_dict)

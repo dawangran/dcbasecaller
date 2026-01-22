@@ -114,7 +114,7 @@ def ctc_beam_search_decode(
     input_lengths: Optional[torch.Tensor] = None,
 ) -> List[List[int]]:
     if beam_width <= 1:
-        return ctc_greedy_decode(logits_tbc, blank_idx=blank_idx)
+        return ctc_greedy_decode(logits_tbc, blank_idx=blank_idx, input_lengths=input_lengths)
     log_probs = torch.log_softmax(logits_tbc, dim=2).cpu().numpy()
     if input_lengths is None:
         lengths = [log_probs.shape[0]] * log_probs.shape[1]
