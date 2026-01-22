@@ -2,14 +2,14 @@
 """
 train_ddp_multifolder.py
 
-在你原 train_ddp.py 基础上，最小改动实现多文件夹输入 + 自动 split + wandb。
+在你原 train_ddp.py 基础上，最小改动实现 jsonl.gz 输入 + 自动 split + wandb。
 
 关键：保持原数据流不变
 - Dataset 仍然返回 signal_str（字符串），由 BasecallModel.tokenizer 编码成 input_ids
 - reference 仍按 ref_row[ref_row>0] 取 labels
 
 新增：
-- --data_folders 多文件夹
+- --jsonl_paths 多文件夹/多文件输入
 - 自动 split（--train_ratio/--val_ratio/--test_ratio，按 folder 或 file group）
 - wandb（仅 rank0）
 - CTC 使用 batch["input_lengths"]（来自 tokenizer attention_mask）
@@ -38,9 +38,9 @@ from .utils import seed_everything, BLANK_IDX
 from .model import BasecallModel
 from .metrics import ctc_greedy_decode, batch_pbma, plot_curves, save_metrics_csv, ctc_crf_loss
 from .data_multifolder import (
-    scan_pair_files,
-    split_pair_files_by_group,
-    MultiFolderSignalRefDataset,
+    scan_jsonl_files,
+    split_jsonl_files_by_group,
+    MultiJsonlSignalRefDataset,
     create_collate_fn,
 )
 from .callback import plot_alignment_heatmap
@@ -403,17 +403,17 @@ def _parse_folder_list(value: str | None) -> list[str]:
 def parse_args():
     p = argparse.ArgumentParser()
 
-    p.add_argument("--data_folders", type=str, default="",
-                   help="comma-separated folders; used when per-split folders are not provided")
-    p.add_argument("--train_folders", type=str, default=None,
-                   help="Optional comma-separated folders for training set (skip auto split).")
-    p.add_argument("--val_folders", type=str, default=None,
-                   help="Optional comma-separated folders for validation set (skip auto split).")
-    p.add_argument("--test_folders", type=str, default=None,
-                   help="Optional comma-separated folders for test set (skip auto split).")
+    p.add_argument("--jsonl_paths", type=str, default=None,
+                   help="Comma-separated .jsonl.gz files or folders (uses text/bases fields).")
+    p.add_argument("--train_jsonl_paths", type=str, default=None,
+                   help="Comma-separated .jsonl.gz files or folders for training set (skip auto split).")
+    p.add_argument("--val_jsonl_paths", type=str, default=None,
+                   help="Comma-separated .jsonl.gz files or folders for validation set (skip auto split).")
+    p.add_argument("--test_jsonl_paths", type=str, default=None,
+                   help="Comma-separated .jsonl.gz files or folders for test set (skip auto split).")
     p.add_argument("--group_by", type=str, default="folder", choices=["folder", "file"])
     p.add_argument("--recursive", action="store_true",
-                   help="Scan subfolders for tokens_*.npy/reference_*.npy pairs.")
+                   help="Scan subfolders for .jsonl.gz inputs.")
 
     p.add_argument("--train_ratio", type=float, default=0.8)
     p.add_argument("--val_ratio", type=float, default=0.1)
@@ -534,20 +534,21 @@ def main():
     tokenizer = model.module.tokenizer if hasattr(model, "module") else model.tokenizer
 
     # ---- scan + split ----
-    train_folders = _parse_folder_list(args.train_folders)
-    val_folders = _parse_folder_list(args.val_folders)
-    test_folders = _parse_folder_list(args.test_folders)
-    if train_folders or val_folders or test_folders:
-        train_files = scan_pair_files(train_folders, group_by=args.group_by, recursive=args.recursive)
-        val_files = scan_pair_files(val_folders, group_by=args.group_by, recursive=args.recursive) if val_folders else []
-        test_files = scan_pair_files(test_folders, group_by=args.group_by, recursive=args.recursive) if test_folders else []
+    train_jsonl_paths = _parse_folder_list(args.train_jsonl_paths)
+    val_jsonl_paths = _parse_folder_list(args.val_jsonl_paths)
+    test_jsonl_paths = _parse_folder_list(args.test_jsonl_paths)
+
+    if train_jsonl_paths or val_jsonl_paths or test_jsonl_paths:
+        train_files = scan_jsonl_files(train_jsonl_paths, group_by=args.group_by, recursive=args.recursive)
+        val_files = scan_jsonl_files(val_jsonl_paths, group_by=args.group_by, recursive=args.recursive) if val_jsonl_paths else []
+        test_files = scan_jsonl_files(test_jsonl_paths, group_by=args.group_by, recursive=args.recursive) if test_jsonl_paths else []
     else:
-        if not args.data_folders:
-            raise ValueError("Provide --data_folders or explicit --train_folders/--val_folders/--test_folders.")
-        folders = [x.strip() for x in args.data_folders.split(",") if x.strip()]
-        pair_files = scan_pair_files(folders, group_by=args.group_by, recursive=args.recursive)
-        train_files, val_files, test_files = split_pair_files_by_group(
-            pair_files,
+        if not args.jsonl_paths:
+            raise ValueError("Provide --jsonl_paths or explicit --train_jsonl_paths/--val_jsonl_paths/--test_jsonl_paths.")
+        jsonl_paths = [x.strip() for x in args.jsonl_paths.split(",") if x.strip()]
+        jsonl_files = scan_jsonl_files(jsonl_paths, group_by=args.group_by, recursive=args.recursive)
+        train_files, val_files, test_files = split_jsonl_files_by_group(
+            jsonl_files,
             train_ratio=args.train_ratio,
             val_ratio=args.val_ratio,
             test_ratio=args.test_ratio,
@@ -557,9 +558,9 @@ def main():
     if is_main_process(rank):
         logger.info(f"[Data] train_files={len(train_files)} val_files={len(val_files)} test_files={len(test_files)}")
 
-    train_dataset = MultiFolderSignalRefDataset(train_files)
-    val_dataset = MultiFolderSignalRefDataset(val_files) if len(val_files) else None
-    test_dataset = MultiFolderSignalRefDataset(test_files) if len(test_files) else None
+    train_dataset = MultiJsonlSignalRefDataset(train_files)
+    val_dataset = MultiJsonlSignalRefDataset(val_files) if len(val_files) else None
+    test_dataset = MultiJsonlSignalRefDataset(test_files) if len(test_files) else None
 
     collate_fn = create_collate_fn(tokenizer)
 

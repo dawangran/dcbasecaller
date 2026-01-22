@@ -3,7 +3,7 @@
 This repo provides training, evaluation, and inference utilities for a CTC-based basecalling model.
 The core workflow is:
 
-1. **Prepare data** as paired `tokens_*.npy` and `reference_*.npy` files.
+1. **Prepare data** as `.jsonl.gz` files (one JSON object per line).
 2. **Install** this package (`pip install -e .`) and use the console scripts.
 3. **Train** with `basecall-train`.
 4. **Evaluate** with `basecall-eval`.
@@ -19,17 +19,16 @@ pip install -e .
 
 ## 1) Data Format
 
-Each data folder contains paired files:
+Each JSONL.GZ line is a record like (bases can be letters or digit IDs):
 
-- `tokens_*.npy`: array of strings, each string is a signal token sequence like
-  `"<|bwav:5018|><|bwav:3738|>..."`.
-- `reference_*.npy`: array of label sequences aligned to `tokens_*.npy`.
-
-The script looks for pairs by replacing `tokens_` with `reference_` and keeping the same suffix.
+```json
+{"read_id":"id1","text":"<|bwav:123|><|bwav:456|>...","bases":"ACGT"}
+{"read_id":"id2","text":"<|bwav:123|><|bwav:456|>...","bases":"1234"}
+```
 
 ### Directory layouts supported
 
-- **Flat layout**: `tokens_*.npy` and `reference_*.npy` in the same folder.
+- **Flat layout**: `.jsonl.gz` files in the same folder.
 - **Nested layout**: add `--recursive` to scan subfolders.
 
 ---
@@ -40,7 +39,16 @@ The script looks for pairs by replacing `tokens_` with `reference_` and keeping 
 
 ```bash
 basecall-train \
-  --data_folders /path/to/data1,/path/to/data2 \
+  --jsonl_paths /path/to/data1,/path/to/data2 \
+  --model_name_or_path <hf-model> \
+  --output_dir outputs
+```
+
+### Train from jsonl.gz (auto split)
+
+```bash
+basecall-train \
+  --jsonl_paths /path/to/reads.jsonl.gz,/path/to/more_jsonl \
   --model_name_or_path <hf-model> \
   --output_dir outputs
 ```
@@ -49,9 +57,9 @@ basecall-train \
 
 ```bash
 basecall-train \
-  --train_folders /path/to/train \
-  --val_folders /path/to/val \
-  --test_folders /path/to/test \
+  --train_jsonl_paths /path/to/train \
+  --val_jsonl_paths /path/to/val \
+  --test_jsonl_paths /path/to/test \
   --model_name_or_path <hf-model> \
   --output_dir outputs
 ```
@@ -59,10 +67,10 @@ basecall-train \
 ### All training arguments
 
 **Data & split**
-- `--data_folders`: comma-separated folders for auto split.
-- `--train_folders`, `--val_folders`, `--test_folders`: explicit split folders (skip auto split).
+- `--jsonl_paths`: comma-separated `.jsonl.gz` files or folders (uses `text` as tokens and `bases` as reference).
+- `--train_jsonl_paths`, `--val_jsonl_paths`, `--test_jsonl_paths`: explicit JSONL split inputs (skip auto split).
 - `--group_by`: `folder` or `file` (controls leakage prevention when auto splitting).
-- `--recursive`: scan subfolders for `tokens_*.npy`.
+- `--recursive`: scan subfolders for `.jsonl.gz`.
 - `--train_ratio`, `--val_ratio`, `--test_ratio`: ratios for auto split.
 - `--split_seed`: random seed for auto split.
 
@@ -107,7 +115,7 @@ basecall-train \
 
 ```bash
 basecall-eval \
-  --data_folder /path/to/data \
+  --jsonl_paths /path/to/reads.jsonl.gz,/path/to/more_jsonl \
   --model_name_or_path <hf-model> \
   --ckpt ckpt_best.pt \
   --decoder greedy \
@@ -121,7 +129,7 @@ basecall-eval \
 
 ### All evaluation arguments
 
-- `--data_folder`: folder containing `tokens_*.npy` and `reference_*.npy`.
+- `--jsonl_paths`: comma-separated `.jsonl.gz` files or folders (uses `text` as tokens and `bases` as reference).
 - `--model_name_or_path`: HuggingFace model ID or local path.
 - `--ckpt`: checkpoint path.
 - `--decoder`: `greedy`, `beam`, or `crf` (crf requires k2 or ont-koi + `ctc_crf.py` adapter).
@@ -159,7 +167,7 @@ basecall-infer \
 
 **Model & input**
 - `--ckpt`, `--model_name_or_path`.
-- `--jsonl_gz`: input JSONL/JSONL.GZ with `{"id": "...", "text": "<|bwav:...|>..."}` records.
+- `--jsonl_gz`: input JSONL.GZ with `{"id": "...", "text": "<|bwav:...|>..."}` records.
 - `--out`: output FASTQ path.
 - `--device`, `--amp`.
 - `--max_tokens`: maximum token count per chunk when splitting long inputs.
@@ -200,13 +208,13 @@ This prints inferred head settings and suggested `basecall-eval`/`basecall-infer
 ```bash
 # 1) Train (auto split)
 basecall-train \
-  --data_folders /path/to/data \
+  --jsonl_paths /path/to/data \
   --model_name_or_path <hf-model> \
   --output_dir outputs
 
 # 2) Evaluate
 basecall-eval \
-  --data_folder /path/to/data \
+  --jsonl_paths /path/to/data \
   --model_name_or_path <hf-model> \
   --ckpt outputs/ckpt_last.pt \
   --decoder greedy
