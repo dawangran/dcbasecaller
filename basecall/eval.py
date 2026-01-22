@@ -2,12 +2,12 @@
 """
 eval.py
 
-Evaluate a single folder of tokens/reference pairs and report PBMA + error type proportions.
+Evaluate jsonl.gz reads and report PBMA + error type proportions.
 Also export alignment heatmaps for a few reads.
 
 Example:
   python eval.py \
-    --data_folder /path/to/data \
+    --jsonl_paths /path/to/reads.jsonl.gz \
     --model_name_or_path your_hf_model \
     --ckpt ckpt_best.pt \
     --decoder greedy \
@@ -30,7 +30,7 @@ import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from .data_multifolder import scan_pair_files, MultiFolderSignalRefDataset, create_collate_fn
+from .data_multifolder import scan_jsonl_files, MultiJsonlSignalRefDataset, create_collate_fn
 from .metrics import ctc_decode, batch_pbma, cal_per_base_match_accuracy
 from .model import BasecallModel
 from .utils import BLANK_IDX, ID2BASE, seed_everything
@@ -182,6 +182,12 @@ def load_checkpoint_state(path: str) -> Dict[str, torch.Tensor]:
     raise ValueError(f"Unsupported checkpoint format: {path}")
 
 
+def _parse_path_list(value: str | None) -> List[str]:
+    if not value:
+        return []
+    return [x.strip() for x in value.split(",") if x.strip()]
+
+
 def _infer_head_layers(state_dict: Dict[str, torch.Tensor], default_layers: int) -> int:
     indices = set()
     for key in state_dict.keys():
@@ -243,7 +249,8 @@ def _resolve_head_config(state_dict: Dict[str, torch.Tensor]) -> Dict[str, objec
 @torch.no_grad()
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--data_folder", required=True)
+    ap.add_argument("--jsonl_paths", required=True,
+                    help="Comma-separated .jsonl.gz files or folders (uses text/bases fields).")
     ap.add_argument("--model_name_or_path", required=True)
     ap.add_argument("--ckpt", required=True)
     ap.add_argument("--decoder", choices=["greedy", "beam", "crf"], default="greedy")
@@ -262,9 +269,11 @@ def main() -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     use_amp = device.type == "cuda"
 
-    pair_files = scan_pair_files([args.data_folder], group_by="file", recursive=False)
-    if not pair_files:
-        raise ValueError(f"No paired files found under: {args.data_folder}")
+    jsonl_paths = _parse_path_list(args.jsonl_paths)
+    jsonl_files = scan_jsonl_files(jsonl_paths, group_by="file", recursive=False)
+    if not jsonl_files:
+        raise ValueError(f"No jsonl files found under: {args.jsonl_paths}")
+    dataset = MultiJsonlSignalRefDataset(jsonl_files)
 
     state_dict = load_checkpoint_state(args.ckpt)
     head_config = _resolve_head_config(state_dict)
@@ -281,7 +290,6 @@ def main() -> None:
     model.load_state_dict(state_dict, strict=False)
     model.eval()
 
-    dataset = MultiFolderSignalRefDataset(pair_files)
     collate_fn = create_collate_fn(model.tokenizer)
     loader = DataLoader(
         dataset,
