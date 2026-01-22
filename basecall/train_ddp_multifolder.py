@@ -484,6 +484,8 @@ def parse_args():
                    help="Optional auxiliary loss weight to penalize blank-dominated frames.")
     p.add_argument("--loss_type", choices=["ctc", "ctc-crf"], default="ctc",
                    help="Training loss type. Use ctc-crf only if a compatible ctc_crf library is installed.")
+    p.add_argument("--ctc_crf_state_len", type=int, default=5,
+                   help="State length for Bonito CTC-CRF (used to set output classes).")
 
 
     return p.parse_args()
@@ -504,8 +506,17 @@ def main():
         logger.info(f"[Args] {vars(args)}")
 
     # ---- model (先建模型拿 tokenizer，保持原数据逻辑) ----
+    num_classes = None
+    if args.loss_type == "ctc-crf":
+        import os as _os
+        from . import ctc_crf as crf_backend
+
+        _os.environ["CTC_CRF_STATE_LEN"] = str(args.ctc_crf_state_len)
+        num_classes = crf_backend.crf_num_classes(args.ctc_crf_state_len)
+
     base_model = BasecallModel(
         model_path=args.model_name_or_path,
+        num_classes=num_classes if num_classes is not None else None,
         hidden_layer=args.hidden_layer,
         freeze_backbone=bool(args.freeze_backbone),
         unfreeze_last_n_layers=args.unfreeze_last_n_layers,

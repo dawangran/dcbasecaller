@@ -215,6 +215,13 @@ def _infer_use_pointwise(state_dict: Dict[str, torch.Tensor], default_value: boo
     return default_value
 
 
+def _infer_num_classes(state_dict: Dict[str, torch.Tensor], default_value: int) -> int:
+    weight = state_dict.get("base_head.proj.weight")
+    if isinstance(weight, torch.Tensor) and weight.dim() == 2:
+        return int(weight.shape[0])
+    return default_value
+
+
 def _infer_transformer_layers(state_dict: Dict[str, torch.Tensor]) -> int:
     indices = set()
     for key in state_dict.keys():
@@ -231,6 +238,7 @@ def _resolve_head_config(state_dict: Dict[str, torch.Tensor]) -> Dict[str, objec
     head_layers = _infer_head_layers(state_dict, default_layers=2)
     head_kernel_size = _infer_kernel_size(state_dict, default_kernel=5)
     head_use_pointwise = _infer_use_pointwise(state_dict, default_value=True)
+    num_classes = _infer_num_classes(state_dict, default_value=len(ID2BASE))
 
     inferred_transformer_layers = _infer_transformer_layers(state_dict)
     head_transformer_layers = inferred_transformer_layers
@@ -243,6 +251,7 @@ def _resolve_head_config(state_dict: Dict[str, torch.Tensor]) -> Dict[str, objec
         "head_use_transformer": bool(head_use_transformer),
         "head_transformer_layers": int(head_transformer_layers),
         "head_transformer_heads": int(head_transformer_heads),
+        "num_classes": int(num_classes),
     }
 
 
@@ -279,6 +288,7 @@ def main() -> None:
     head_config = _resolve_head_config(state_dict)
     model = BasecallModel(
         model_path=args.model_name_or_path,
+        num_classes=head_config["num_classes"],
         hidden_layer=args.hidden_layer,
         head_kernel_size=head_config["head_kernel_size"],
         head_layers=head_config["head_layers"],

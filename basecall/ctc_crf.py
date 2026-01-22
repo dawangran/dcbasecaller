@@ -24,6 +24,11 @@ def _alphabet() -> List[str]:
     max_id = max(ID2BASE.keys())
     return [ID2BASE[i] for i in range(max_id + 1)]
 
+def crf_num_classes(state_len: int, alphabet: List[str] | None = None) -> int:
+    alphabet = alphabet or _alphabet()
+    n_base = len(alphabet[1:])
+    return len(alphabet) * (n_base ** state_len)
+
 
 def _prepare_targets(
     targets: torch.Tensor,

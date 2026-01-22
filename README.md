@@ -93,6 +93,7 @@ basecall-train \
 - `--batch_size`, `--num_epochs`, `--lr`, `--weight_decay`, `--warmup_ratio`, `--min_lr`.
 - `--aux_blank_weight`: optional penalty to discourage blank-dominated outputs.
 - `--loss_type`: `ctc` (default) or `ctc-crf` (requires k2 or ont-koi + `ctc_crf.py` adapter).
+- `--ctc_crf_state_len`: Bonito CTC-CRF state length (controls CRF head output classes).
 
 **Checkpointing & loading**
 - `--resume_ckpt`: resume from `ckpt_last.pt` (model/optim/sched/epoch/best_pbma).
