@@ -15,7 +15,9 @@ from .utils import BLANK_IDX, ID2BASE
 # ---------------- CTC 解码 ----------------
 
 def ctc_greedy_decode(
-    logits_tbc: torch.Tensor, blank_idx: int = BLANK_IDX
+    logits_tbc: torch.Tensor,
+    blank_idx: int = BLANK_IDX,
+    input_lengths: Optional[torch.Tensor] = None,
 ) -> List[List[int]]:
     """
     logits_tbc: [T, B, C] (模型 forward 推理的输出)
@@ -25,10 +27,18 @@ def ctc_greedy_decode(
     pred_ids = pred_ids.cpu().numpy()
 
     B = pred_ids.shape[1]
+    if input_lengths is None:
+        lengths = [pred_ids.shape[0]] * B
+    else:
+        lengths = [min(int(x), pred_ids.shape[0]) for x in input_lengths.cpu().tolist()]
     decoded: List[List[int]] = []
 
     for b in range(B):
-        seq = pred_ids[:, b].tolist()
+        length = lengths[b]
+        if length <= 0:
+            decoded.append([])
+            continue
+        seq = pred_ids[:length, b].tolist()
         # CTC: 去重复 + 去 blank
         new_seq = []
         prev = None
@@ -101,19 +111,29 @@ def ctc_beam_search_decode(
     logits_tbc: torch.Tensor,
     beam_width: int = 5,
     blank_idx: int = BLANK_IDX,
+    input_lengths: Optional[torch.Tensor] = None,
 ) -> List[List[int]]:
     if beam_width <= 1:
         return ctc_greedy_decode(logits_tbc, blank_idx=blank_idx)
     log_probs = torch.log_softmax(logits_tbc, dim=2).cpu().numpy()
+    if input_lengths is None:
+        lengths = [log_probs.shape[0]] * log_probs.shape[1]
+    else:
+        lengths = [min(int(x), log_probs.shape[0]) for x in input_lengths.cpu().tolist()]
     decoded = []
     for b in range(log_probs.shape[1]):
-        decoded.append(_ctc_beam_search_single(log_probs[:, b, :], beam_width, blank_idx))
+        length = lengths[b]
+        if length <= 0:
+            decoded.append([])
+            continue
+        decoded.append(_ctc_beam_search_single(log_probs[:length, b, :], beam_width, blank_idx))
     return decoded
 
 
 def ctc_crf_decode(
     logits_tbc: torch.Tensor,
     blank_idx: int = BLANK_IDX,
+    input_lengths: Optional[torch.Tensor] = None,
 ) -> List[List[int]]:
     try:
         from . import ctc_crf  # type: ignore
@@ -128,7 +148,17 @@ def ctc_crf_decode(
             "ctc_crf.decode not found. Provide a CTC-CRF library with a decode(logits, blank_idx) API."
         )
 
-    return ctc_crf.decode(logits_tbc, blank_idx=blank_idx)
+    if input_lengths is None:
+        return ctc_crf.decode(logits_tbc, blank_idx=blank_idx)
+    lengths = [min(int(x), logits_tbc.size(0)) for x in input_lengths.cpu().tolist()]
+    decoded: List[List[int]] = []
+    for b, length in enumerate(lengths):
+        if length <= 0:
+            decoded.append([])
+            continue
+        logits = logits_tbc[:length, b : b + 1, :]
+        decoded.extend(ctc_crf.decode(logits, blank_idx=blank_idx))
+    return decoded
 
 
 def ctc_decode(
@@ -136,13 +166,19 @@ def ctc_decode(
     decoder: str = "greedy",
     beam_width: int = 5,
     blank_idx: int = BLANK_IDX,
+    input_lengths: Optional[torch.Tensor] = None,
 ) -> List[List[int]]:
     if decoder == "greedy":
-        return ctc_greedy_decode(logits_tbc, blank_idx=blank_idx)
+        return ctc_greedy_decode(logits_tbc, blank_idx=blank_idx, input_lengths=input_lengths)
     if decoder == "beam":
-        return ctc_beam_search_decode(logits_tbc, beam_width=beam_width, blank_idx=blank_idx)
+        return ctc_beam_search_decode(
+            logits_tbc,
+            beam_width=beam_width,
+            blank_idx=blank_idx,
+            input_lengths=input_lengths,
+        )
     if decoder == "crf":
-        return ctc_crf_decode(logits_tbc, blank_idx=blank_idx)
+        return ctc_crf_decode(logits_tbc, blank_idx=blank_idx, input_lengths=input_lengths)
     raise ValueError(f"Unknown decoder: {decoder}")
 
 

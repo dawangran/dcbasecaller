@@ -45,6 +45,7 @@ def _constant_qstring(length: int, q: int) -> str:
 def ctc_greedy_with_q_bonito(
     logits_btc: torch.Tensor,
     blank_idx: int = 0,
+    input_length: int | None = None,
 ) -> Tuple[str, str]:
     """
     logits_btc: [1, T, C]（单条 read）
@@ -57,6 +58,11 @@ def ctc_greedy_with_q_bonito(
     """
     assert logits_btc.dim() == 3 and logits_btc.shape[0] == 1
     probs = torch.softmax(logits_btc[0], dim=-1)  # [T, C]
+    if input_length is not None:
+        input_length = min(int(input_length), probs.size(0))
+        if input_length <= 0:
+            return "", ""
+        probs = probs[:input_length]
 
     # viterbi path
     path = torch.argmax(probs, dim=-1).tolist()  # [T]
@@ -323,6 +329,14 @@ def main():
                 attention_mask = enc.get("attention_mask")
                 if attention_mask is not None:
                     attention_mask = attention_mask.to(device)
+                    input_lengths = attention_mask.sum(dim=1).to(torch.long)
+                else:
+                    input_lengths = torch.full(
+                        (input_ids.size(0),),
+                        input_ids.size(1),
+                        dtype=torch.long,
+                        device=input_ids.device,
+                    )
 
                 with torch.cuda.amp.autocast(enabled=use_amp):
                     logits_btc = model(input_ids, attention_mask=attention_mask)  # [B,T,C]
@@ -330,7 +344,9 @@ def main():
                 if args.decoder == "greedy":
                     for idx in range(logits_btc.size(0)):
                         seq, qstring = ctc_greedy_with_q_bonito(
-                            logits_btc[idx:idx + 1], blank_idx=BLANK_IDX
+                            logits_btc[idx:idx + 1],
+                            blank_idx=BLANK_IDX,
+                            input_length=input_lengths[idx].item(),
                         )
                         chunk_seqs.append(seq)
                         chunk_qs.append(qstring)
@@ -341,6 +357,7 @@ def main():
                         decoder=args.decoder,
                         beam_width=args.beam_width,
                         blank_idx=BLANK_IDX,
+                        input_lengths=input_lengths,
                     )
                     for ids in pred_ids:
                         seq = "".join(ID2BASE.get(i, "N") for i in ids)

@@ -342,6 +342,7 @@ def main() -> None:
             decoder=args.decoder,
             beam_width=args.beam_width,
             blank_idx=BLANK_IDX,
+            input_lengths=batch.get("input_lengths"),
         )
         ref_ids = batch["target_seqs"]
 
