@@ -212,8 +212,21 @@ def ctc_crf_loss(
     batch_size = logits_tbc.size(1)
     targets = targets.to(device=device)
     target_lengths = target_lengths.to(device=device)
+    input_lengths = input_lengths.to(device=device)
     padded_targets = _prepare_targets(targets, target_lengths, batch_size, device)
-    return model.ctc_loss(logits_tbc, padded_targets, target_lengths)
+    losses = []
+    for i in range(batch_size):
+        time_len = int(input_lengths[i].item())
+        if time_len <= 0:
+            continue
+        target_len = int(target_lengths[i].item())
+        sample_targets = padded_targets[i : i + 1, :target_len]
+        sample_target_lengths = target_lengths[i : i + 1]
+        sample_scores = logits_tbc[:time_len, i : i + 1, :]
+        losses.append(model.ctc_loss(sample_scores, sample_targets, sample_target_lengths))
+    if not losses:
+        return logits_tbc.new_tensor(0.0)
+    return torch.stack(losses).mean()
 
 
 def decode(logits_tbc: torch.Tensor, blank_idx: int = 0) -> List[List[int]]:
