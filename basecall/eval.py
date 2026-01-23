@@ -2,12 +2,12 @@
 """
 eval.py
 
-Evaluate a single folder of tokens/reference pairs and report PBMA + error type proportions.
+Evaluate jsonl.gz reads and report PBMA + error type proportions.
 Also export alignment heatmaps for a few reads.
 
 Example:
   python eval.py \
-    --data_folder /path/to/data \
+    --jsonl_paths /path/to/reads.jsonl.gz \
     --model_name_or_path your_hf_model \
     --ckpt ckpt_best.pt \
     --decoder greedy \
@@ -30,7 +30,13 @@ import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from .data_multifolder import scan_pair_files, MultiFolderSignalRefDataset, create_collate_fn
+from .data_multifolder import (
+    scan_jsonl_files,
+    MultiJsonlSignalRefDataset,
+    scan_npy_pairs,
+    MultiNpySignalRefDataset,
+    create_collate_fn,
+)
 from .metrics import ctc_decode, batch_pbma, cal_per_base_match_accuracy
 from .model import BasecallModel
 from .utils import BLANK_IDX, ID2BASE, seed_everything
@@ -182,6 +188,12 @@ def load_checkpoint_state(path: str) -> Dict[str, torch.Tensor]:
     raise ValueError(f"Unsupported checkpoint format: {path}")
 
 
+def _parse_path_list(value: str | None) -> List[str]:
+    if not value:
+        return []
+    return [x.strip() for x in value.split(",") if x.strip()]
+
+
 def _infer_head_layers(state_dict: Dict[str, torch.Tensor], default_layers: int) -> int:
     indices = set()
     for key in state_dict.keys():
@@ -209,6 +221,13 @@ def _infer_use_pointwise(state_dict: Dict[str, torch.Tensor], default_value: boo
     return default_value
 
 
+def _infer_num_classes(state_dict: Dict[str, torch.Tensor], default_value: int) -> int:
+    weight = state_dict.get("base_head.proj.weight")
+    if isinstance(weight, torch.Tensor) and weight.dim() == 2:
+        return int(weight.shape[0])
+    return default_value
+
+
 def _infer_transformer_layers(state_dict: Dict[str, torch.Tensor]) -> int:
     indices = set()
     for key in state_dict.keys():
@@ -225,6 +244,7 @@ def _resolve_head_config(state_dict: Dict[str, torch.Tensor]) -> Dict[str, objec
     head_layers = _infer_head_layers(state_dict, default_layers=2)
     head_kernel_size = _infer_kernel_size(state_dict, default_kernel=5)
     head_use_pointwise = _infer_use_pointwise(state_dict, default_value=True)
+    num_classes = _infer_num_classes(state_dict, default_value=len(ID2BASE))
 
     inferred_transformer_layers = _infer_transformer_layers(state_dict)
     head_transformer_layers = inferred_transformer_layers
@@ -237,13 +257,19 @@ def _resolve_head_config(state_dict: Dict[str, torch.Tensor]) -> Dict[str, objec
         "head_use_transformer": bool(head_use_transformer),
         "head_transformer_layers": int(head_transformer_layers),
         "head_transformer_heads": int(head_transformer_heads),
+        "num_classes": int(num_classes),
     }
 
 
 @torch.no_grad()
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--data_folder", required=True)
+    ap.add_argument("--jsonl_paths", default=None,
+                    help="Comma-separated .jsonl.gz files or folders (uses text/bases fields).")
+    ap.add_argument("--npy_paths", default=None,
+                    help="Comma-separated folders or tokens_*.npy/reference_*.npy files (uses token/reference pairs).")
+    ap.add_argument("--recursive", action="store_true",
+                    help="Scan subfolders for .jsonl.gz or tokens/reference .npy inputs.")
     ap.add_argument("--model_name_or_path", required=True)
     ap.add_argument("--ckpt", required=True)
     ap.add_argument("--decoder", choices=["greedy", "beam", "crf"], default="greedy")
@@ -262,14 +288,29 @@ def main() -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     use_amp = device.type == "cuda"
 
-    pair_files = scan_pair_files([args.data_folder], group_by="file", recursive=False)
-    if not pair_files:
-        raise ValueError(f"No paired files found under: {args.data_folder}")
+    if args.jsonl_paths and args.npy_paths:
+        raise ValueError("Do not mix jsonl inputs with tokens/reference npy inputs in the same run.")
+
+    if args.npy_paths:
+        npy_paths = _parse_path_list(args.npy_paths)
+        npy_pairs = scan_npy_pairs(npy_paths, group_by="file", recursive=args.recursive)
+        if not npy_pairs:
+            raise ValueError(f"No tokens/reference npy files found under: {args.npy_paths}")
+        dataset = MultiNpySignalRefDataset(npy_pairs)
+    else:
+        if not args.jsonl_paths:
+            raise ValueError("Provide --jsonl_paths or --npy_paths.")
+        jsonl_paths = _parse_path_list(args.jsonl_paths)
+        jsonl_files = scan_jsonl_files(jsonl_paths, group_by="file", recursive=args.recursive)
+        if not jsonl_files:
+            raise ValueError(f"No jsonl files found under: {args.jsonl_paths}")
+        dataset = MultiJsonlSignalRefDataset(jsonl_files)
 
     state_dict = load_checkpoint_state(args.ckpt)
     head_config = _resolve_head_config(state_dict)
     model = BasecallModel(
         model_path=args.model_name_or_path,
+        num_classes=head_config["num_classes"],
         hidden_layer=args.hidden_layer,
         head_kernel_size=head_config["head_kernel_size"],
         head_layers=head_config["head_layers"],
@@ -281,7 +322,6 @@ def main() -> None:
     model.load_state_dict(state_dict, strict=False)
     model.eval()
 
-    dataset = MultiFolderSignalRefDataset(pair_files)
     collate_fn = create_collate_fn(model.tokenizer)
     loader = DataLoader(
         dataset,
@@ -324,6 +364,7 @@ def main() -> None:
             decoder=args.decoder,
             beam_width=args.beam_width,
             blank_idx=BLANK_IDX,
+            input_lengths=batch.get("input_lengths"),
         )
         ref_ids = batch["target_seqs"]
 

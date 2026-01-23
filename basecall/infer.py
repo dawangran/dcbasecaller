@@ -45,6 +45,7 @@ def _constant_qstring(length: int, q: int) -> str:
 def ctc_greedy_with_q_bonito(
     logits_btc: torch.Tensor,
     blank_idx: int = 0,
+    input_length: int | None = None,
 ) -> Tuple[str, str]:
     """
     logits_btc: [1, T, C]（单条 read）
@@ -57,6 +58,11 @@ def ctc_greedy_with_q_bonito(
     """
     assert logits_btc.dim() == 3 and logits_btc.shape[0] == 1
     probs = torch.softmax(logits_btc[0], dim=-1)  # [T, C]
+    if input_length is not None:
+        input_length = min(int(input_length), probs.size(0))
+        if input_length <= 0:
+            return "", ""
+        probs = probs[:input_length]
 
     # viterbi path
     path = torch.argmax(probs, dim=-1).tolist()  # [T]
@@ -132,7 +138,7 @@ def iter_jsonl_reads(path: str) -> Iterable[Tuple[str, str]]:
             if not line:
                 continue
             obj = json.loads(line)
-            read_id = str(obj.get("id", ""))
+            read_id = str(obj.get("read_id", "") or obj.get("id", ""))
             text = obj.get("text", "")
             if not read_id or not text:
                 continue
@@ -166,6 +172,13 @@ def _infer_use_pointwise(state_dict: Dict[str, torch.Tensor], default_value: boo
     return default_value
 
 
+def _infer_num_classes(state_dict: Dict[str, torch.Tensor], default_value: int) -> int:
+    weight = state_dict.get("base_head.proj.weight")
+    if isinstance(weight, torch.Tensor) and weight.dim() == 2:
+        return int(weight.shape[0])
+    return default_value
+
+
 def _infer_transformer_layers(state_dict: Dict[str, torch.Tensor]) -> int:
     indices = set()
     for key in state_dict.keys():
@@ -182,6 +195,7 @@ def _resolve_head_config(state_dict: Dict[str, torch.Tensor]) -> Dict[str, objec
     head_layers = _infer_head_layers(state_dict, default_layers=2)
     head_kernel_size = _infer_kernel_size(state_dict, default_kernel=5)
     head_use_pointwise = _infer_use_pointwise(state_dict, default_value=True)
+    num_classes = _infer_num_classes(state_dict, default_value=len(ID2BASE))
 
     inferred_transformer_layers = _infer_transformer_layers(state_dict)
     head_transformer_layers = inferred_transformer_layers
@@ -194,6 +208,7 @@ def _resolve_head_config(state_dict: Dict[str, torch.Tensor]) -> Dict[str, objec
         "head_use_transformer": bool(head_use_transformer),
         "head_transformer_layers": int(head_transformer_layers),
         "head_transformer_heads": int(head_transformer_heads),
+        "num_classes": int(num_classes),
     }
 
 
@@ -280,6 +295,7 @@ def main():
     # load model
     model = BasecallModel(
         model_path=args.model_name_or_path,
+        num_classes=head_config["num_classes"],
         hidden_layer=args.hidden_layer,
         head_kernel_size=head_config["head_kernel_size"],
         head_layers=head_config["head_layers"],
@@ -313,6 +329,14 @@ def main():
                 attention_mask = enc.get("attention_mask")
                 if attention_mask is not None:
                     attention_mask = attention_mask.to(device)
+                    input_lengths = attention_mask.sum(dim=1).to(torch.long)
+                else:
+                    input_lengths = torch.full(
+                        (input_ids.size(0),),
+                        input_ids.size(1),
+                        dtype=torch.long,
+                        device=input_ids.device,
+                    )
 
                 with torch.cuda.amp.autocast(enabled=use_amp):
                     logits_btc = model(input_ids, attention_mask=attention_mask)  # [B,T,C]
@@ -320,7 +344,9 @@ def main():
                 if args.decoder == "greedy":
                     for idx in range(logits_btc.size(0)):
                         seq, qstring = ctc_greedy_with_q_bonito(
-                            logits_btc[idx:idx + 1], blank_idx=BLANK_IDX
+                            logits_btc[idx:idx + 1],
+                            blank_idx=BLANK_IDX,
+                            input_length=input_lengths[idx].item(),
                         )
                         chunk_seqs.append(seq)
                         chunk_qs.append(qstring)
@@ -331,6 +357,7 @@ def main():
                         decoder=args.decoder,
                         beam_width=args.beam_width,
                         blank_idx=BLANK_IDX,
+                        input_lengths=input_lengths,
                     )
                     for ids in pred_ids:
                         seq = "".join(ID2BASE.get(i, "N") for i in ids)

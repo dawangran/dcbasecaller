@@ -2,14 +2,14 @@
 """
 train_ddp_multifolder.py
 
-在你原 train_ddp.py 基础上，最小改动实现多文件夹输入 + 自动 split + wandb。
+在你原 train_ddp.py 基础上，最小改动实现 jsonl.gz 输入 + 自动 split + wandb。
 
 关键：保持原数据流不变
 - Dataset 仍然返回 signal_str（字符串），由 BasecallModel.tokenizer 编码成 input_ids
 - reference 仍按 ref_row[ref_row>0] 取 labels
 
 新增：
-- --data_folders 多文件夹
+- --jsonl_paths 多文件夹/多文件输入
 - 自动 split（--train_ratio/--val_ratio/--test_ratio，按 folder 或 file group）
 - wandb（仅 rank0）
 - CTC 使用 batch["input_lengths"]（来自 tokenizer attention_mask）
@@ -38,9 +38,12 @@ from .utils import seed_everything, BLANK_IDX
 from .model import BasecallModel
 from .metrics import ctc_greedy_decode, batch_pbma, plot_curves, save_metrics_csv, ctc_crf_loss
 from .data_multifolder import (
-    scan_pair_files,
-    split_pair_files_by_group,
-    MultiFolderSignalRefDataset,
+    scan_jsonl_files,
+    split_jsonl_files_by_group,
+    MultiJsonlSignalRefDataset,
+    scan_npy_pairs,
+    split_npy_pairs_by_group,
+    MultiNpySignalRefDataset,
     create_collate_fn,
 )
 from .callback import plot_alignment_heatmap
@@ -303,7 +306,7 @@ def train_one_epoch(model, ctc_loss, data_loader, optimizer, scheduler,
 
 
 @torch.no_grad()
-def eval_one_epoch(model, ctc_loss, data_loader, device, rank: int, split_name: str):
+def eval_one_epoch(model, ctc_loss, data_loader, device, rank: int, split_name: str, loss_type: str):
     model.eval()
     total_loss, n_batches = 0.0, 0
     total_pbma, n_pbma = 0.0, 0
@@ -328,11 +331,25 @@ def eval_one_epoch(model, ctc_loss, data_loader, device, rank: int, split_name: 
         # logits_btc = model(input_ids)              # [B,T,C]
         logits_tbc = logits_btc.transpose(0, 1)    # [T,B,C]
 
-        loss = ctc_loss(logits_tbc.log_softmax(2), target_labels, input_lengths, target_lengths)
+        if loss_type == "ctc-crf":
+            loss = ctc_crf_loss(
+                logits_tbc,
+                target_labels,
+                input_lengths,
+                target_lengths,
+                blank_idx=BLANK_IDX,
+            )
+        else:
+            loss = ctc_loss(logits_tbc.log_softmax(2), target_labels, input_lengths, target_lengths)
         total_loss += float(loss.item())
         n_batches += 1
 
-        pred_seqs = ctc_greedy_decode(logits_tbc, blank_idx=BLANK_IDX)
+        pred_seqs = ctc_decode(
+            logits_tbc,
+            decoder="crf" if loss_type == "ctc-crf" else "greedy",
+            blank_idx=BLANK_IDX,
+            input_lengths=input_lengths,
+        )
         pbma = batch_pbma(pred_seqs, batch["target_seqs"])
         total_pbma += float(pbma)
         n_pbma += 1
@@ -403,17 +420,25 @@ def _parse_folder_list(value: str | None) -> list[str]:
 def parse_args():
     p = argparse.ArgumentParser()
 
-    p.add_argument("--data_folders", type=str, default="",
-                   help="comma-separated folders; used when per-split folders are not provided")
-    p.add_argument("--train_folders", type=str, default=None,
-                   help="Optional comma-separated folders for training set (skip auto split).")
-    p.add_argument("--val_folders", type=str, default=None,
-                   help="Optional comma-separated folders for validation set (skip auto split).")
-    p.add_argument("--test_folders", type=str, default=None,
-                   help="Optional comma-separated folders for test set (skip auto split).")
+    p.add_argument("--jsonl_paths", type=str, default=None,
+                   help="Comma-separated .jsonl.gz files or folders (uses text/bases fields).")
+    p.add_argument("--train_jsonl_paths", type=str, default=None,
+                   help="Comma-separated .jsonl.gz files or folders for training set (skip auto split).")
+    p.add_argument("--val_jsonl_paths", type=str, default=None,
+                   help="Comma-separated .jsonl.gz files or folders for validation set (skip auto split).")
+    p.add_argument("--test_jsonl_paths", type=str, default=None,
+                   help="Comma-separated .jsonl.gz files or folders for test set (skip auto split).")
+    p.add_argument("--npy_paths", type=str, default=None,
+                   help="Comma-separated folders or tokens_*.npy/reference_*.npy files (uses token/reference pairs).")
+    p.add_argument("--train_npy_paths", type=str, default=None,
+                   help="Comma-separated folders or tokens_*.npy/reference_*.npy files for training set.")
+    p.add_argument("--val_npy_paths", type=str, default=None,
+                   help="Comma-separated folders or tokens_*.npy/reference_*.npy files for validation set.")
+    p.add_argument("--test_npy_paths", type=str, default=None,
+                   help="Comma-separated folders or tokens_*.npy/reference_*.npy files for test set.")
     p.add_argument("--group_by", type=str, default="folder", choices=["folder", "file"])
     p.add_argument("--recursive", action="store_true",
-                   help="Scan subfolders for tokens_*.npy/reference_*.npy pairs.")
+                   help="Scan subfolders for .jsonl.gz or tokens/reference .npy inputs.")
 
     p.add_argument("--train_ratio", type=float, default=0.8)
     p.add_argument("--val_ratio", type=float, default=0.1)
@@ -484,6 +509,8 @@ def parse_args():
                    help="Optional auxiliary loss weight to penalize blank-dominated frames.")
     p.add_argument("--loss_type", choices=["ctc", "ctc-crf"], default="ctc",
                    help="Training loss type. Use ctc-crf only if a compatible ctc_crf library is installed.")
+    p.add_argument("--ctc_crf_state_len", type=int, default=5,
+                   help="State length for Bonito CTC-CRF (used to set output classes).")
 
 
     return p.parse_args()
@@ -504,8 +531,17 @@ def main():
         logger.info(f"[Args] {vars(args)}")
 
     # ---- model (先建模型拿 tokenizer，保持原数据逻辑) ----
+    num_classes = None
+    if args.loss_type == "ctc-crf":
+        import os as _os
+        from . import ctc_crf as crf_backend
+
+        _os.environ["CTC_CRF_STATE_LEN"] = str(args.ctc_crf_state_len)
+        num_classes = crf_backend.crf_num_classes(args.ctc_crf_state_len)
+
     base_model = BasecallModel(
         model_path=args.model_name_or_path,
+        num_classes=num_classes if num_classes is not None else None,
         hidden_layer=args.hidden_layer,
         freeze_backbone=bool(args.freeze_backbone),
         unfreeze_last_n_layers=args.unfreeze_last_n_layers,
@@ -534,32 +570,66 @@ def main():
     tokenizer = model.module.tokenizer if hasattr(model, "module") else model.tokenizer
 
     # ---- scan + split ----
-    train_folders = _parse_folder_list(args.train_folders)
-    val_folders = _parse_folder_list(args.val_folders)
-    test_folders = _parse_folder_list(args.test_folders)
-    if train_folders or val_folders or test_folders:
-        train_files = scan_pair_files(train_folders, group_by=args.group_by, recursive=args.recursive)
-        val_files = scan_pair_files(val_folders, group_by=args.group_by, recursive=args.recursive) if val_folders else []
-        test_files = scan_pair_files(test_folders, group_by=args.group_by, recursive=args.recursive) if test_folders else []
+    train_jsonl_paths = _parse_folder_list(args.train_jsonl_paths)
+    val_jsonl_paths = _parse_folder_list(args.val_jsonl_paths)
+    test_jsonl_paths = _parse_folder_list(args.test_jsonl_paths)
+    train_npy_paths = _parse_folder_list(args.train_npy_paths)
+    val_npy_paths = _parse_folder_list(args.val_npy_paths)
+    test_npy_paths = _parse_folder_list(args.test_npy_paths)
+
+    using_jsonl = bool(args.jsonl_paths or train_jsonl_paths or val_jsonl_paths or test_jsonl_paths)
+    using_npy = bool(args.npy_paths or train_npy_paths or val_npy_paths or test_npy_paths)
+    if using_jsonl and using_npy:
+        raise ValueError("Do not mix jsonl inputs with tokens/reference npy inputs in the same run.")
+
+    if using_npy:
+        if train_npy_paths or val_npy_paths or test_npy_paths:
+            train_pairs = scan_npy_pairs(train_npy_paths, group_by=args.group_by, recursive=args.recursive)
+            val_pairs = scan_npy_pairs(val_npy_paths, group_by=args.group_by, recursive=args.recursive) if val_npy_paths else []
+            test_pairs = scan_npy_pairs(test_npy_paths, group_by=args.group_by, recursive=args.recursive) if test_npy_paths else []
+        else:
+            if not args.npy_paths:
+                raise ValueError("Provide --npy_paths or explicit --train_npy_paths/--val_npy_paths/--test_npy_paths.")
+            npy_paths = [x.strip() for x in args.npy_paths.split(",") if x.strip()]
+            npy_pairs = scan_npy_pairs(npy_paths, group_by=args.group_by, recursive=args.recursive)
+            train_pairs, val_pairs, test_pairs = split_npy_pairs_by_group(
+                npy_pairs,
+                train_ratio=args.train_ratio,
+                val_ratio=args.val_ratio,
+                test_ratio=args.test_ratio,
+                seed=args.split_seed,
+            )
+
+        if is_main_process(rank):
+            logger.info(f"[Data] train_pairs={len(train_pairs)} val_pairs={len(val_pairs)} test_pairs={len(test_pairs)}")
+
+        train_dataset = MultiNpySignalRefDataset(train_pairs)
+        val_dataset = MultiNpySignalRefDataset(val_pairs) if len(val_pairs) else None
+        test_dataset = MultiNpySignalRefDataset(test_pairs) if len(test_pairs) else None
     else:
-        if not args.data_folders:
-            raise ValueError("Provide --data_folders or explicit --train_folders/--val_folders/--test_folders.")
-        folders = [x.strip() for x in args.data_folders.split(",") if x.strip()]
-        pair_files = scan_pair_files(folders, group_by=args.group_by, recursive=args.recursive)
-        train_files, val_files, test_files = split_pair_files_by_group(
-            pair_files,
-            train_ratio=args.train_ratio,
-            val_ratio=args.val_ratio,
-            test_ratio=args.test_ratio,
-            seed=args.split_seed,
-        )
+        if train_jsonl_paths or val_jsonl_paths or test_jsonl_paths:
+            train_files = scan_jsonl_files(train_jsonl_paths, group_by=args.group_by, recursive=args.recursive)
+            val_files = scan_jsonl_files(val_jsonl_paths, group_by=args.group_by, recursive=args.recursive) if val_jsonl_paths else []
+            test_files = scan_jsonl_files(test_jsonl_paths, group_by=args.group_by, recursive=args.recursive) if test_jsonl_paths else []
+        else:
+            if not args.jsonl_paths:
+                raise ValueError("Provide --jsonl_paths or explicit --train_jsonl_paths/--val_jsonl_paths/--test_jsonl_paths.")
+            jsonl_paths = [x.strip() for x in args.jsonl_paths.split(",") if x.strip()]
+            jsonl_files = scan_jsonl_files(jsonl_paths, group_by=args.group_by, recursive=args.recursive)
+            train_files, val_files, test_files = split_jsonl_files_by_group(
+                jsonl_files,
+                train_ratio=args.train_ratio,
+                val_ratio=args.val_ratio,
+                test_ratio=args.test_ratio,
+                seed=args.split_seed,
+            )
 
-    if is_main_process(rank):
-        logger.info(f"[Data] train_files={len(train_files)} val_files={len(val_files)} test_files={len(test_files)}")
+        if is_main_process(rank):
+            logger.info(f"[Data] train_files={len(train_files)} val_files={len(val_files)} test_files={len(test_files)}")
 
-    train_dataset = MultiFolderSignalRefDataset(train_files)
-    val_dataset = MultiFolderSignalRefDataset(val_files) if len(val_files) else None
-    test_dataset = MultiFolderSignalRefDataset(test_files) if len(test_files) else None
+        train_dataset = MultiJsonlSignalRefDataset(train_files)
+        val_dataset = MultiJsonlSignalRefDataset(val_files) if len(val_files) else None
+        test_dataset = MultiJsonlSignalRefDataset(test_files) if len(test_files) else None
 
     collate_fn = create_collate_fn(tokenizer)
 
@@ -685,7 +755,7 @@ def main():
         if val_loader is not None:
             if val_sampler is not None:
                 val_sampler.set_epoch(epoch)
-            val_loss, val_pbma = eval_one_epoch(model, ctc_loss, val_loader, device, rank, "val")
+            val_loss, val_pbma = eval_one_epoch(model, ctc_loss, val_loader, device, rank, "val", args.loss_type)
             val_losses.append(val_loss)
             val_pbmas.append(val_pbma)
 
@@ -728,7 +798,7 @@ def main():
 
     # ---- test ----
     if test_loader is not None:
-        test_loss, test_pbma = eval_one_epoch(model, ctc_loss, test_loader, device, rank, "test")
+        test_loss, test_pbma = eval_one_epoch(model, ctc_loss, test_loader, device, rank, "test", args.loss_type)
         if is_main_process(rank):
             logger.info(f"[Test] loss={test_loss:.4f} pbma={test_pbma:.4f}")
             if use_wandb and wandb is not None:

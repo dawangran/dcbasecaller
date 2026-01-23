@@ -15,7 +15,7 @@ class BasecallHead(nn.Module):
     def __init__(
         self,
         hidden_size: int,
-        num_classes: int = NUM_CLASSES,
+        num_classes: int | None = NUM_CLASSES,
         blank_idx: int = 0,
         kernel_size: int = 5,
         num_layers: int = 2,
@@ -159,6 +159,9 @@ class BasecallModel(nn.Module):
         )
         if hidden_size is None:
             raise ValueError("Cannot infer hidden_size from backbone config.")
+
+        if num_classes is None:
+            num_classes = NUM_CLASSES
 
         self.base_head = BasecallHead(
             hidden_size=hidden_size,
