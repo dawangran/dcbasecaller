@@ -214,7 +214,7 @@ basecall-infer \
 
 **Model & input**
 - `--ckpt`, `--model_name_or_path`.
-- `--jsonl_gz`: input JSONL.GZ with `{"id": "...", "text": "<|bwav:...|>..."}` records.
+- `--jsonl_gz`: input JSONL.GZ with `{"read_id": "...", "text": "<|bwav:...|>..."}` records.
 - `--out`: output FASTQ path.
 - `--device`, `--amp`.
 - `--max_tokens`: maximum token count per chunk when splitting long inputs.

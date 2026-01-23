@@ -138,7 +138,7 @@ def iter_jsonl_reads(path: str) -> Iterable[Tuple[str, str]]:
             if not line:
                 continue
             obj = json.loads(line)
-            read_id = str(obj.get("id", ""))
+            read_id = str(obj.get("read_id", "") or obj.get("id", ""))
             text = obj.get("text", "")
             if not read_id or not text:
                 continue
