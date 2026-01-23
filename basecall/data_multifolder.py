@@ -2,7 +2,11 @@
 """
 data_multifolder.py
 
+<<<<<<< HEAD
 支持 jsonl.gz / tokens_*.npy + reference_*.npy 输入 + 自动 split：
+=======
+支持 jsonl.gz 输入 + 自动 split：
+>>>>>>> 3ae4819d96d6b2c5a5cc10d402c0499cf08fe0b9
 
 - text 字段是 signal_str（例如 "<|bwav:5018|><|bwav:3738|>..."），交给 tokenizer 编码
 - bases 字段是 label 序列（支持数字串或 A/C/G/T 字符串）
@@ -11,11 +15,16 @@ data_multifolder.py
 
 新增能力：
 - scan_jsonl_files: 扫描多个 jsonl.gz 文件或文件夹
+<<<<<<< HEAD
 - scan_npy_pairs: 扫描 tokens_*.npy + reference_*.npy 文件对
 - split_jsonl_files_by_group: 按 folder 或 file 分组切 train/val/test，默认 folder（避免泄漏）
 - split_npy_pairs_by_group: 按 folder 或 file 分组切 train/val/test
 - MultiJsonlSignalRefDataset: 从 jsonl.gz 聚合所有 reads
 - MultiNpySignalRefDataset: 从 tokens/reference npy 聚合所有 reads
+=======
+- split_jsonl_files_by_group: 按 folder 或 file 分组切 train/val/test，默认 folder（避免泄漏）
+- MultiJsonlSignalRefDataset: 从 jsonl.gz 聚合所有 reads
+>>>>>>> 3ae4819d96d6b2c5a5cc10d402c0499cf08fe0b9
 - collate_fn 额外返回 input_lengths（从 attention_mask 计算），方便 CTC 用真实长度
 """
 
@@ -44,6 +53,7 @@ from .utils import BASE2ID
 class JsonlFile:
     path: str
     group_id: str
+<<<<<<< HEAD
 
 
 @dataclass(frozen=True)
@@ -51,6 +61,8 @@ class NpyPair:
     tokens_path: str
     reference_path: str
     group_id: str
+=======
+>>>>>>> 3ae4819d96d6b2c5a5cc10d402c0499cf08fe0b9
 
 
 def _iter_jsonl_files(folder: str, recursive: bool) -> List[str]:
@@ -68,6 +80,7 @@ def _iter_jsonl_files(folder: str, recursive: bool) -> List[str]:
     return sorted(set(matches))
 
 
+<<<<<<< HEAD
 def _iter_npy_files(folder: str, recursive: bool) -> List[str]:
     patterns = ("*.npy",)
     if recursive:
@@ -83,6 +96,8 @@ def _iter_npy_files(folder: str, recursive: bool) -> List[str]:
     return sorted(set(matches))
 
 
+=======
+>>>>>>> 3ae4819d96d6b2c5a5cc10d402c0499cf08fe0b9
 def scan_jsonl_files(
     data_paths: List[str],
     group_by: str = "folder",
@@ -105,6 +120,7 @@ def scan_jsonl_files(
     paths = sorted(set(paths))
     if not paths:
         raise ValueError(f"No .jsonl.gz found under: {data_paths}")
+<<<<<<< HEAD
 
     jsonl_files: List[JsonlFile] = []
     for path in paths:
@@ -175,6 +191,19 @@ def scan_npy_pairs(
             raise ValueError("group_by must be 'folder' or 'file'")
         npy_pairs.append(NpyPair(tokens_path=tok_path, reference_path=ref_path, group_id=gid))
     return npy_pairs
+=======
+
+    jsonl_files: List[JsonlFile] = []
+    for path in paths:
+        if group_by == "folder":
+            gid = os.path.abspath(os.path.dirname(path))
+        elif group_by == "file":
+            gid = os.path.abspath(path)
+        else:
+            raise ValueError("group_by must be 'folder' or 'file'")
+        jsonl_files.append(JsonlFile(path=path, group_id=gid))
+    return jsonl_files
+>>>>>>> 3ae4819d96d6b2c5a5cc10d402c0499cf08fe0b9
 
 
 def _split_groups(groups: List[str], train_ratio: float, val_ratio: float, seed: int):
@@ -222,6 +251,7 @@ def split_jsonl_files_by_group(
     return train_files, val_files, test_files
 
 
+<<<<<<< HEAD
 def split_npy_pairs_by_group(
     npy_pairs: List[NpyPair],
     train_ratio: float = 0.8,
@@ -251,6 +281,8 @@ def split_npy_pairs_by_group(
     return train_pairs, val_pairs, test_pairs
 
 
+=======
+>>>>>>> 3ae4819d96d6b2c5a5cc10d402c0499cf08fe0b9
 # -------------------------
 # Dataset + collate (保持原风格)
 # -------------------------
@@ -260,12 +292,17 @@ def _parse_bases(value: Any) -> List[int]:
     if value is None:
         return []
     if isinstance(value, (list, tuple, np.ndarray)):
+<<<<<<< HEAD
         if isinstance(value, np.ndarray):
             if value.size == 0:
                 return []
         else:
             if not value:
                 return []
+=======
+        if not value:
+            return []
+>>>>>>> 3ae4819d96d6b2c5a5cc10d402c0499cf08fe0b9
         if all(isinstance(x, (int, np.integer)) for x in value):
             return [int(x) for x in value]
         if all(isinstance(x, str) for x in value):
@@ -282,6 +319,7 @@ def _parse_bases(value: Any) -> List[int]:
     raise ValueError(f"Unsupported bases format: {type(value)}")
 
 
+<<<<<<< HEAD
 def _load_npy_records(path: str) -> List[Any]:
     arr = np.load(path, allow_pickle=True)
     if isinstance(arr, np.ndarray):
@@ -311,6 +349,8 @@ def _normalize_tokens(value: Any) -> str:
     return str(value)
 
 
+=======
+>>>>>>> 3ae4819d96d6b2c5a5cc10d402c0499cf08fe0b9
 def _iter_jsonl_records(path: str):
     with gzip.open(path, "rt", encoding="utf-8") as f:
         for line in f:
@@ -348,6 +388,7 @@ class MultiJsonlSignalRefDataset(Dataset):
     def __getitem__(self, idx):
         signal_str = self.signal_list[idx]
         ref_row = np.asarray(self.target_list[idx]).reshape(-1)
+<<<<<<< HEAD
         labels = ref_row[ref_row > 0].astype(np.int64).tolist()
         return {"signal_str": signal_str, "target_seq": labels}
 
@@ -386,6 +427,8 @@ class MultiNpySignalRefDataset(Dataset):
     def __getitem__(self, idx):
         signal_str = self.signal_list[idx]
         ref_row = np.asarray(self.target_list[idx]).reshape(-1)
+=======
+>>>>>>> 3ae4819d96d6b2c5a5cc10d402c0499cf08fe0b9
         labels = ref_row[ref_row > 0].astype(np.int64).tolist()
         return {"signal_str": signal_str, "target_seq": labels}
 

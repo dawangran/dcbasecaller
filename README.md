@@ -3,7 +3,11 @@
 This repo provides training, evaluation, and inference utilities for a CTC-based basecalling model.
 The core workflow is:
 
+<<<<<<< HEAD
 1. **Prepare data** as `.jsonl.gz` files (one JSON object per line) or `tokens_*.npy` + `reference_*.npy` pairs.
+=======
+1. **Prepare data** as `.jsonl.gz` files (one JSON object per line).
+>>>>>>> 3ae4819d96d6b2c5a5cc10d402c0499cf08fe0b9
 2. **Install** this package (`pip install -e .`) and use the console scripts.
 3. **Train** with `basecall-train`.
 4. **Evaluate** with `basecall-eval`.
@@ -19,14 +23,20 @@ pip install -e .
 
 ## 1) Data Format
 
+<<<<<<< HEAD
 ### JSONL.GZ
 
 Each JSONL.GZ line is a record like (bases can be letters or digit IDs):
 
+=======
+Each JSONL.GZ line is a record like (bases can be letters or digit IDs):
+
+>>>>>>> 3ae4819d96d6b2c5a5cc10d402c0499cf08fe0b9
 ```json
 {"read_id":"id1","text":"<|bwav:123|><|bwav:456|>...","bases":"ACGT"}
 {"read_id":"id2","text":"<|bwav:123|><|bwav:456|>...","bases":"1234"}
 ```
+<<<<<<< HEAD
 
 ### NPY pairs
 
@@ -35,6 +45,8 @@ Provide `tokens_*.npy` and `reference_*.npy` with matching suffixes in the same 
 
 - `tokens_*.npy`: token strings or sequences that can be joined into the `<|bwav:...|>` text.
 - `reference_*.npy`: bases as A/C/G/T strings or digit IDs.
+=======
+>>>>>>> 3ae4819d96d6b2c5a5cc10d402c0499cf08fe0b9
 
 ### Directory layouts supported
 
@@ -50,6 +62,8 @@ Provide `tokens_*.npy` and `reference_*.npy` with matching suffixes in the same 
 ```bash
 basecall-train \
   --jsonl_paths /path/to/data1,/path/to/data2 \
+<<<<<<< HEAD
+=======
   --model_name_or_path <hf-model> \
   --output_dir outputs
 ```
@@ -58,6 +72,17 @@ basecall-train \
 
 ```bash
 basecall-train \
+  --jsonl_paths /path/to/reads.jsonl.gz,/path/to/more_jsonl \
+>>>>>>> 3ae4819d96d6b2c5a5cc10d402c0499cf08fe0b9
+  --model_name_or_path <hf-model> \
+  --output_dir outputs
+```
+
+### Train from jsonl.gz (auto split)
+
+```bash
+basecall-train \
+<<<<<<< HEAD
   --jsonl_paths /path/to/reads.jsonl.gz,/path/to/more_jsonl \
   --model_name_or_path <hf-model> \
   --output_dir outputs
@@ -90,6 +115,11 @@ basecall-train \
   --train_npy_paths /path/to/train \
   --val_npy_paths /path/to/val \
   --test_npy_paths /path/to/test \
+=======
+  --train_jsonl_paths /path/to/train \
+  --val_jsonl_paths /path/to/val \
+  --test_jsonl_paths /path/to/test \
+>>>>>>> 3ae4819d96d6b2c5a5cc10d402c0499cf08fe0b9
   --model_name_or_path <hf-model> \
   --output_dir outputs
 ```
@@ -99,10 +129,15 @@ basecall-train \
 **Data & split**
 - `--jsonl_paths`: comma-separated `.jsonl.gz` files or folders (uses `text` as tokens and `bases` as reference).
 - `--train_jsonl_paths`, `--val_jsonl_paths`, `--test_jsonl_paths`: explicit JSONL split inputs (skip auto split).
+<<<<<<< HEAD
 - `--npy_paths`: comma-separated folders or `tokens_*.npy`/`reference_*.npy` files (uses token/reference pairs).
 - `--train_npy_paths`, `--val_npy_paths`, `--test_npy_paths`: explicit npy split inputs (skip auto split).
 - `--group_by`: `folder` or `file` (controls leakage prevention when auto splitting).
 - `--recursive`: scan subfolders for `.jsonl.gz` or tokens/reference `.npy`.
+=======
+- `--group_by`: `folder` or `file` (controls leakage prevention when auto splitting).
+- `--recursive`: scan subfolders for `.jsonl.gz`.
+>>>>>>> 3ae4819d96d6b2c5a5cc10d402c0499cf08fe0b9
 - `--train_ratio`, `--val_ratio`, `--test_ratio`: ratios for auto split.
 - `--split_seed`: random seed for auto split.
 
@@ -175,7 +210,10 @@ basecall-eval \
 ### All evaluation arguments
 
 - `--jsonl_paths`: comma-separated `.jsonl.gz` files or folders (uses `text` as tokens and `bases` as reference).
+<<<<<<< HEAD
 - `--npy_paths`: comma-separated folders or `tokens_*.npy`/`reference_*.npy` files (uses token/reference pairs).
+=======
+>>>>>>> 3ae4819d96d6b2c5a5cc10d402c0499cf08fe0b9
 - `--model_name_or_path`: HuggingFace model ID or local path.
 - `--ckpt`: checkpoint path.
 - `--decoder`: `greedy`, `beam`, or `crf` (crf requires k2 or ont-koi + `ctc_crf.py` adapter).
@@ -214,7 +252,11 @@ basecall-infer \
 
 **Model & input**
 - `--ckpt`, `--model_name_or_path`.
+<<<<<<< HEAD
 - `--jsonl_gz`: input JSONL.GZ with `{"read_id": "...", "text": "<|bwav:...|>..."}` records.
+=======
+- `--jsonl_gz`: input JSONL.GZ with `{"id": "...", "text": "<|bwav:...|>..."}` records.
+>>>>>>> 3ae4819d96d6b2c5a5cc10d402c0499cf08fe0b9
 - `--out`: output FASTQ path.
 - `--device`, `--amp`.
 - `--max_tokens`: maximum token count per chunk when splitting long inputs.
