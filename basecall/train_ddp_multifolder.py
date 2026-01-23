@@ -306,7 +306,7 @@ def train_one_epoch(model, ctc_loss, data_loader, optimizer, scheduler,
 
 
 @torch.no_grad()
-def eval_one_epoch(model, ctc_loss, data_loader, device, rank: int, split_name: str):
+def eval_one_epoch(model, ctc_loss, data_loader, device, rank: int, split_name: str, loss_type: str):
     model.eval()
     total_loss, n_batches = 0.0, 0
     total_pbma, n_pbma = 0.0, 0
@@ -331,7 +331,16 @@ def eval_one_epoch(model, ctc_loss, data_loader, device, rank: int, split_name: 
         # logits_btc = model(input_ids)              # [B,T,C]
         logits_tbc = logits_btc.transpose(0, 1)    # [T,B,C]
 
-        loss = ctc_loss(logits_tbc.log_softmax(2), target_labels, input_lengths, target_lengths)
+        if loss_type == "ctc-crf":
+            loss = ctc_crf_loss(
+                logits_tbc,
+                target_labels,
+                input_lengths,
+                target_lengths,
+                blank_idx=BLANK_IDX,
+            )
+        else:
+            loss = ctc_loss(logits_tbc.log_softmax(2), target_labels, input_lengths, target_lengths)
         total_loss += float(loss.item())
         n_batches += 1
 
@@ -741,7 +750,7 @@ def main():
         if val_loader is not None:
             if val_sampler is not None:
                 val_sampler.set_epoch(epoch)
-            val_loss, val_pbma = eval_one_epoch(model, ctc_loss, val_loader, device, rank, "val")
+            val_loss, val_pbma = eval_one_epoch(model, ctc_loss, val_loader, device, rank, "val", args.loss_type)
             val_losses.append(val_loss)
             val_pbmas.append(val_pbma)
 
@@ -784,7 +793,7 @@ def main():
 
     # ---- test ----
     if test_loader is not None:
-        test_loss, test_pbma = eval_one_epoch(model, ctc_loss, test_loader, device, rank, "test")
+        test_loss, test_pbma = eval_one_epoch(model, ctc_loss, test_loader, device, rank, "test", args.loss_type)
         if is_main_process(rank):
             logger.info(f"[Test] loss={test_loss:.4f} pbma={test_pbma:.4f}")
             if use_wandb and wandb is not None:
