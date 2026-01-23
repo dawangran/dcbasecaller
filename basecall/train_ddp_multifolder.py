@@ -344,7 +344,12 @@ def eval_one_epoch(model, ctc_loss, data_loader, device, rank: int, split_name: 
         total_loss += float(loss.item())
         n_batches += 1
 
-        pred_seqs = ctc_greedy_decode(logits_tbc, blank_idx=BLANK_IDX, input_lengths=input_lengths)
+        pred_seqs = ctc_decode(
+            logits_tbc,
+            decoder="crf" if loss_type == "ctc-crf" else "greedy",
+            blank_idx=BLANK_IDX,
+            input_lengths=input_lengths,
+        )
         pbma = batch_pbma(pred_seqs, batch["target_seqs"])
         total_pbma += float(pbma)
         n_pbma += 1
