@@ -41,12 +41,9 @@ from .data_multifolder import (
     scan_jsonl_files,
     split_jsonl_files_by_group,
     MultiJsonlSignalRefDataset,
-<<<<<<< HEAD
     scan_npy_pairs,
     split_npy_pairs_by_group,
     MultiNpySignalRefDataset,
-=======
->>>>>>> 3ae4819d96d6b2c5a5cc10d402c0499cf08fe0b9
     create_collate_fn,
 )
 from .callback import plot_alignment_heatmap
@@ -431,7 +428,6 @@ def parse_args():
                    help="Comma-separated .jsonl.gz files or folders for validation set (skip auto split).")
     p.add_argument("--test_jsonl_paths", type=str, default=None,
                    help="Comma-separated .jsonl.gz files or folders for test set (skip auto split).")
-<<<<<<< HEAD
     p.add_argument("--npy_paths", type=str, default=None,
                    help="Comma-separated folders or tokens_*.npy/reference_*.npy files (uses token/reference pairs).")
     p.add_argument("--train_npy_paths", type=str, default=None,
@@ -443,11 +439,6 @@ def parse_args():
     p.add_argument("--group_by", type=str, default="folder", choices=["folder", "file"])
     p.add_argument("--recursive", action="store_true",
                    help="Scan subfolders for .jsonl.gz or tokens/reference .npy inputs.")
-=======
-    p.add_argument("--group_by", type=str, default="folder", choices=["folder", "file"])
-    p.add_argument("--recursive", action="store_true",
-                   help="Scan subfolders for .jsonl.gz inputs.")
->>>>>>> 3ae4819d96d6b2c5a5cc10d402c0499cf08fe0b9
 
     p.add_argument("--train_ratio", type=float, default=0.8)
     p.add_argument("--val_ratio", type=float, default=0.1)
@@ -582,7 +573,6 @@ def main():
     train_jsonl_paths = _parse_folder_list(args.train_jsonl_paths)
     val_jsonl_paths = _parse_folder_list(args.val_jsonl_paths)
     test_jsonl_paths = _parse_folder_list(args.test_jsonl_paths)
-<<<<<<< HEAD
     train_npy_paths = _parse_folder_list(args.train_npy_paths)
     val_npy_paths = _parse_folder_list(args.val_npy_paths)
     test_npy_paths = _parse_folder_list(args.test_npy_paths)
@@ -633,38 +623,13 @@ def main():
                 test_ratio=args.test_ratio,
                 seed=args.split_seed,
             )
-=======
-
-    if train_jsonl_paths or val_jsonl_paths or test_jsonl_paths:
-        train_files = scan_jsonl_files(train_jsonl_paths, group_by=args.group_by, recursive=args.recursive)
-        val_files = scan_jsonl_files(val_jsonl_paths, group_by=args.group_by, recursive=args.recursive) if val_jsonl_paths else []
-        test_files = scan_jsonl_files(test_jsonl_paths, group_by=args.group_by, recursive=args.recursive) if test_jsonl_paths else []
-    else:
-        if not args.jsonl_paths:
-            raise ValueError("Provide --jsonl_paths or explicit --train_jsonl_paths/--val_jsonl_paths/--test_jsonl_paths.")
-        jsonl_paths = [x.strip() for x in args.jsonl_paths.split(",") if x.strip()]
-        jsonl_files = scan_jsonl_files(jsonl_paths, group_by=args.group_by, recursive=args.recursive)
-        train_files, val_files, test_files = split_jsonl_files_by_group(
-            jsonl_files,
-            train_ratio=args.train_ratio,
-            val_ratio=args.val_ratio,
-            test_ratio=args.test_ratio,
-            seed=args.split_seed,
-        )
->>>>>>> 3ae4819d96d6b2c5a5cc10d402c0499cf08fe0b9
 
         if is_main_process(rank):
             logger.info(f"[Data] train_files={len(train_files)} val_files={len(val_files)} test_files={len(test_files)}")
 
-<<<<<<< HEAD
         train_dataset = MultiJsonlSignalRefDataset(train_files)
         val_dataset = MultiJsonlSignalRefDataset(val_files) if len(val_files) else None
         test_dataset = MultiJsonlSignalRefDataset(test_files) if len(test_files) else None
-=======
-    train_dataset = MultiJsonlSignalRefDataset(train_files)
-    val_dataset = MultiJsonlSignalRefDataset(val_files) if len(val_files) else None
-    test_dataset = MultiJsonlSignalRefDataset(test_files) if len(test_files) else None
->>>>>>> 3ae4819d96d6b2c5a5cc10d402c0499cf08fe0b9
 
     collate_fn = create_collate_fn(tokenizer)
 

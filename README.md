@@ -3,7 +3,7 @@
 This repo provides training, evaluation, and inference utilities for a CTC-based basecalling model.
 The core workflow is:
 
-1. **Prepare data** as paired `tokens_*.npy` and `reference_*.npy` files.
+1. **Prepare data** as `.jsonl.gz` files (one JSON object per line) or `tokens_*.npy` + `reference_*.npy` pairs.
 2. **Install** this package (`pip install -e .`) and use the console scripts.
 3. **Train** with `basecall-train`.
 4. **Evaluate** with `basecall-eval`.
@@ -19,39 +19,77 @@ pip install -e .
 
 ## 1) Data Format
 
-Each data folder contains paired files:
+### JSONL.GZ
 
-- `tokens_*.npy`: array of strings, each string is a signal token sequence like
-  `"<|bwav:5018|><|bwav:3738|>..."`.
-- `reference_*.npy`: array of label sequences aligned to `tokens_*.npy`.
+Each JSONL.GZ line is a record like (bases can be letters or digit IDs):
 
-The script looks for pairs by replacing `tokens_` with `reference_` and keeping the same suffix.
+```json
+{"read_id":"id1","text":"<|bwav:123|><|bwav:456|>...","bases":"ACGT"}
+{"read_id":"id2","text":"<|bwav:123|><|bwav:456|>...","bases":"1234"}
+```
+
+### NPY pairs
+
+Provide `tokens_*.npy` and `reference_*.npy` with matching suffixes in the same folder
+(e.g. `tokens_000.npy` + `reference_000.npy`). Each array row should align between the two files:
+
+- `tokens_*.npy`: token strings or sequences that can be joined into the `<|bwav:...|>` text.
+- `reference_*.npy`: bases as A/C/G/T strings or digit IDs.
 
 ### Directory layouts supported
 
-- **Flat layout**: `tokens_*.npy` and `reference_*.npy` in the same folder.
+- **Flat layout**: `.jsonl.gz` files in the same folder.
 - **Nested layout**: add `--recursive` to scan subfolders.
 
 ---
 
 ## 2) Training
 
-### Basic usage (auto split)
+### Basic usage (auto split, jsonl.gz)
 
 ```bash
 basecall-train \
-  --data_folders /path/to/data1,/path/to/data2 \
+  --jsonl_paths /path/to/data1,/path/to/data2 \
   --model_name_or_path <hf-model> \
   --output_dir outputs
 ```
 
-### Use explicit train/val/test folders (skip auto split)
+### Train from jsonl.gz (auto split)
 
 ```bash
 basecall-train \
-  --train_folders /path/to/train \
-  --val_folders /path/to/val \
-  --test_folders /path/to/test \
+  --jsonl_paths /path/to/reads.jsonl.gz,/path/to/more_jsonl \
+  --model_name_or_path <hf-model> \
+  --output_dir outputs
+```
+
+### Use explicit train/val/test folders (skip auto split, jsonl.gz)
+
+```bash
+basecall-train \
+  --train_jsonl_paths /path/to/train \
+  --val_jsonl_paths /path/to/val \
+  --test_jsonl_paths /path/to/test \
+  --model_name_or_path <hf-model> \
+  --output_dir outputs
+```
+
+### Train from tokens/reference npy pairs (auto split)
+
+```bash
+basecall-train \
+  --npy_paths /path/to/data_or_dir \
+  --model_name_or_path <hf-model> \
+  --output_dir outputs
+```
+
+### Use explicit train/val/test folders (skip auto split, npy)
+
+```bash
+basecall-train \
+  --train_npy_paths /path/to/train \
+  --val_npy_paths /path/to/val \
+  --test_npy_paths /path/to/test \
   --model_name_or_path <hf-model> \
   --output_dir outputs
 ```
@@ -59,10 +97,12 @@ basecall-train \
 ### All training arguments
 
 **Data & split**
-- `--data_folders`: comma-separated folders for auto split.
-- `--train_folders`, `--val_folders`, `--test_folders`: explicit split folders (skip auto split).
+- `--jsonl_paths`: comma-separated `.jsonl.gz` files or folders (uses `text` as tokens and `bases` as reference).
+- `--train_jsonl_paths`, `--val_jsonl_paths`, `--test_jsonl_paths`: explicit JSONL split inputs (skip auto split).
+- `--npy_paths`: comma-separated folders or `tokens_*.npy`/`reference_*.npy` files (uses token/reference pairs).
+- `--train_npy_paths`, `--val_npy_paths`, `--test_npy_paths`: explicit npy split inputs (skip auto split).
 - `--group_by`: `folder` or `file` (controls leakage prevention when auto splitting).
-- `--recursive`: scan subfolders for `tokens_*.npy`.
+- `--recursive`: scan subfolders for `.jsonl.gz` or tokens/reference `.npy`.
 - `--train_ratio`, `--val_ratio`, `--test_ratio`: ratios for auto split.
 - `--split_seed`: random seed for auto split.
 
@@ -85,6 +125,7 @@ basecall-train \
 - `--batch_size`, `--num_epochs`, `--lr`, `--weight_decay`, `--warmup_ratio`, `--min_lr`.
 - `--aux_blank_weight`: optional penalty to discourage blank-dominated outputs.
 - `--loss_type`: `ctc` (default) or `ctc-crf` (requires k2 or ont-koi + `ctc_crf.py` adapter).
+- `--ctc_crf_state_len`: Bonito CTC-CRF state length (controls CRF head output classes).
 
 **Checkpointing & loading**
 - `--resume_ckpt`: resume from `ckpt_last.pt` (model/optim/sched/epoch/best_pbma).
@@ -107,7 +148,7 @@ basecall-train \
 
 ```bash
 basecall-eval \
-  --data_folder /path/to/data \
+  --jsonl_paths /path/to/reads.jsonl.gz,/path/to/more_jsonl \
   --model_name_or_path <hf-model> \
   --ckpt ckpt_best.pt \
   --decoder greedy \
@@ -119,9 +160,22 @@ basecall-eval \
   --fastq_q 20
 ```
 
+### Evaluate from tokens/reference npy pairs
+
+```bash
+basecall-eval \
+  --npy_paths /path/to/reads_or_dir \
+  --model_name_or_path <hf-model> \
+  --ckpt ckpt_best.pt \
+  --decoder greedy \
+  --batch_size 8 \
+  --out_dir eval_out
+```
+
 ### All evaluation arguments
 
-- `--data_folder`: folder containing `tokens_*.npy` and `reference_*.npy`.
+- `--jsonl_paths`: comma-separated `.jsonl.gz` files or folders (uses `text` as tokens and `bases` as reference).
+- `--npy_paths`: comma-separated folders or `tokens_*.npy`/`reference_*.npy` files (uses token/reference pairs).
 - `--model_name_or_path`: HuggingFace model ID or local path.
 - `--ckpt`: checkpoint path.
 - `--decoder`: `greedy`, `beam`, or `crf` (crf requires k2 or ont-koi + `ctc_crf.py` adapter).
@@ -133,6 +187,7 @@ basecall-eval \
 - `--fastq_out`: optional FASTQ output path for predicted sequences.
 - `--fastq_q`: fixed Phred quality value for FASTQ output (default: 20).
 - `--hidden_layer`: which backbone hidden state to use (default: -1).
+- `--recursive`: scan subfolders for `.jsonl.gz` or tokens/reference `.npy`.
 
 ### Outputs
 
@@ -159,7 +214,7 @@ basecall-infer \
 
 **Model & input**
 - `--ckpt`, `--model_name_or_path`.
-- `--jsonl_gz`: input JSONL/JSONL.GZ with `{"id": "...", "text": "<|bwav:...|>..."}` records.
+- `--jsonl_gz`: input JSONL.GZ with `{"read_id": "...", "text": "<|bwav:...|>..."}` records.
 - `--out`: output FASTQ path.
 - `--device`, `--amp`.
 - `--max_tokens`: maximum token count per chunk when splitting long inputs.
@@ -200,13 +255,13 @@ This prints inferred head settings and suggested `basecall-eval`/`basecall-infer
 ```bash
 # 1) Train (auto split)
 basecall-train \
-  --data_folders /path/to/data \
+  --jsonl_paths /path/to/data \
   --model_name_or_path <hf-model> \
   --output_dir outputs
 
 # 2) Evaluate
 basecall-eval \
-  --data_folder /path/to/data \
+  --jsonl_paths /path/to/data \
   --model_name_or_path <hf-model> \
   --ckpt outputs/ckpt_last.pt \
   --decoder greedy
