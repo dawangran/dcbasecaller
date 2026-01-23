@@ -260,8 +260,12 @@ def _parse_bases(value: Any) -> List[int]:
     if value is None:
         return []
     if isinstance(value, (list, tuple, np.ndarray)):
-        if not value:
-            return []
+        if isinstance(value, np.ndarray):
+            if value.size == 0:
+                return []
+        else:
+            if not value:
+                return []
         if all(isinstance(x, (int, np.integer)) for x in value):
             return [int(x) for x in value]
         if all(isinstance(x, str) for x in value):
