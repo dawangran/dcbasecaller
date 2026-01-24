@@ -36,7 +36,7 @@ from tqdm.auto import tqdm
 
 from .utils import seed_everything, BLANK_IDX
 from .model import BasecallModel
-from .metrics import ctc_greedy_decode, batch_pbma, plot_curves, save_metrics_csv, ctc_crf_loss
+from .metrics import ctc_greedy_decode, ctc_decode, batch_pbma, plot_curves, save_metrics_csv, ctc_crf_loss
 from .data_multifolder import (
     scan_jsonl_files,
     split_jsonl_files_by_group,
