@@ -282,6 +282,10 @@ def main() -> None:
     ap.add_argument("--fastq_out", type=str, default=None)
     ap.add_argument("--fastq_q", type=int, default=20)
     ap.add_argument("--hidden_layer", type=int, default=-1)
+    ap.add_argument("--head_output_activation", choices=["tanh", "relu"], default=None,
+                    help="Optional activation applied to head output logits.")
+    ap.add_argument("--head_output_scale", type=float, default=None,
+                    help="Optional scalar applied to head output logits (after activation).")
     ap.add_argument("--ctc_crf_state_len", type=int, default=5,
                     help="State length for Bonito CTC-CRF (used for CRF decoder).")
     ap.add_argument("--ctc_crf_pad_blank", action="store_true",
@@ -326,6 +330,8 @@ def main() -> None:
         head_use_transformer=head_config["head_use_transformer"],
         head_transformer_layers=head_config["head_transformer_layers"],
         head_transformer_heads=head_config["head_transformer_heads"],
+        head_output_activation=args.head_output_activation,
+        head_output_scale=args.head_output_scale,
     ).to(device)
     model.load_state_dict(state_dict, strict=False)
     model.eval()

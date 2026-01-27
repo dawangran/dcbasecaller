@@ -120,7 +120,9 @@ basecall-train \
 - `--head_disable_pointwise`: disable pointwise conv (default is enabled).
 - `--head_use_transformer`: add transformer layers in head.
 - `--head_transformer_layers`, `--head_transformer_heads`, `--head_transformer_dropout`.
-- `--head_linear`: use a pure linear head (disable conv and transformer blocks; uses LayerNorm + Linear only).
+- `--head_linear`: use a pure linear head (sets `head_layers=0`, disables pointwise/transformer blocks; uses LayerNorm + Linear only).
+- `--head_output_activation`: optional activation for head logits (e.g. `tanh` for Bonito-style scaling).
+- `--head_output_scale`: optional scalar multiplier for head logits (applied after activation).
 
 
 **Optimization**

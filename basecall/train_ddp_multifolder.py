@@ -512,6 +512,10 @@ def parse_args():
     p.add_argument("--head_transformer_layers", type=int, default=1)
     p.add_argument("--head_transformer_heads", type=int, default=4)
     p.add_argument("--head_transformer_dropout", type=float, default=0.1)
+    p.add_argument("--head_output_activation", choices=["tanh", "relu"], default=None,
+                   help="Optional activation applied to head output logits.")
+    p.add_argument("--head_output_scale", type=float, default=None,
+                   help="Optional scalar applied to head output logits (after activation).")
     p.add_argument("--head_linear", action="store_true",
                    help="Use a pure linear head (disable conv/transformer head blocks).")
 
@@ -563,11 +567,6 @@ def main():
         args.head_use_transformer = False
         args.head_disable_pointwise = True
 
-    if args.head_linear:
-        args.head_layers = 0
-        args.head_use_transformer = False
-        args.head_disable_pointwise = True
-
     base_model = BasecallModel(
         model_path=args.model_name_or_path,
         num_classes=num_classes if num_classes is not None else None,
@@ -585,6 +584,8 @@ def main():
         head_transformer_heads=args.head_transformer_heads,
         head_transformer_dropout=args.head_transformer_dropout,
         head_blank_idx=head_blank_idx,
+        head_output_activation=args.head_output_activation,
+        head_output_scale=args.head_output_scale,
     ).to(device)
 
     model = base_model

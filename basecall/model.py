@@ -25,6 +25,8 @@ class BasecallHead(nn.Module):
         transformer_layers: int = 1,
         transformer_heads: int = 4,
         transformer_dropout: float = 0.1,
+        output_activation: str | None = None,
+        output_scale: float | None = None,
     ):
         super().__init__()
         self.norm = nn.LayerNorm(hidden_size)
@@ -62,6 +64,11 @@ class BasecallHead(nn.Module):
             )
             self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=transformer_layers)
         self.proj = nn.Linear(hidden_size, num_classes)
+        self.output_activation = output_activation
+        if output_scale is None:
+            self.output_scale = None
+        else:
+            self.register_buffer("output_scale", torch.tensor(float(output_scale)))
 
         # discourage "all-blank" early collapse
         if self.proj.bias is not None and blank_idx is not None and 0 <= blank_idx < num_classes:
@@ -81,7 +88,17 @@ class BasecallHead(nn.Module):
         x = x.transpose(1, 2)          # [B, T, H]
         if self.transformer is not None:
             x = self.transformer(x)
-        return self.proj(x)            # [B, T, C]
+        x = self.proj(x)            # [B, T, C]
+        if self.output_activation:
+            if self.output_activation == "tanh":
+                x = torch.tanh(x)
+            elif self.output_activation == "relu":
+                x = torch.relu(x)
+            else:
+                raise ValueError(f"Unknown output_activation: {self.output_activation}")
+        if self.output_scale is not None:
+            x = x * self.output_scale
+        return x
 
 
 class BasecallModel(nn.Module):
@@ -107,6 +124,8 @@ class BasecallModel(nn.Module):
         head_transformer_heads: int = 4,
         head_transformer_dropout: float = 0.1,
         head_blank_idx: int | None = 0,
+        head_output_activation: str | None = None,
+        head_output_scale: float | None = None,
     ):
         super().__init__()
         self.hidden_layer = hidden_layer
@@ -179,6 +198,8 @@ class BasecallModel(nn.Module):
             transformer_layers=head_transformer_layers,
             transformer_heads=head_transformer_heads,
             transformer_dropout=head_transformer_dropout,
+            output_activation=head_output_activation,
+            output_scale=head_output_scale,
         )
 
     def _get_transformer_layers(self) -> nn.ModuleList:
