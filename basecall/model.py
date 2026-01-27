@@ -28,24 +28,27 @@ class BasecallHead(nn.Module):
     ):
         super().__init__()
         self.norm = nn.LayerNorm(hidden_size)
-        if kernel_size % 2 == 0:
-            raise ValueError("kernel_size must be odd for symmetric padding.")
-        padding = kernel_size // 2
+        if num_layers < 0:
+            raise ValueError("num_layers must be >= 0.")
         self.blocks = nn.ModuleList()
-        for _ in range(max(1, num_layers)):
-            dwconv = nn.Conv1d(
-                hidden_size,
-                hidden_size,
-                kernel_size=kernel_size,
-                padding=padding,
-                groups=hidden_size,
-            )
-            pwconv = (
-                nn.Conv1d(hidden_size, hidden_size, kernel_size=1)
-                if use_pointwise
-                else nn.Identity()
-            )
-            self.blocks.append(nn.Sequential(dwconv, pwconv))
+        if num_layers > 0:
+            if kernel_size % 2 == 0:
+                raise ValueError("kernel_size must be odd for symmetric padding.")
+            padding = kernel_size // 2
+            for _ in range(num_layers):
+                dwconv = nn.Conv1d(
+                    hidden_size,
+                    hidden_size,
+                    kernel_size=kernel_size,
+                    padding=padding,
+                    groups=hidden_size,
+                )
+                pwconv = (
+                    nn.Conv1d(hidden_size, hidden_size, kernel_size=1)
+                    if use_pointwise
+                    else nn.Identity()
+                )
+                self.blocks.append(nn.Sequential(dwconv, pwconv))
         self.act = nn.GELU()
         self.dropout = nn.Dropout(dropout)
         self.transformer = None

@@ -36,7 +36,7 @@ from tqdm.auto import tqdm
 
 from .utils import seed_everything, BLANK_IDX
 from .model import BasecallModel
-from .metrics import ctc_greedy_decode, batch_pbma, plot_curves, save_metrics_csv, ctc_crf_loss
+from .metrics import ctc_greedy_decode, ctc_decode, batch_pbma, plot_curves, save_metrics_csv, ctc_crf_loss
 from .data_multifolder import (
     scan_jsonl_files,
     split_jsonl_files_by_group,
@@ -504,6 +504,8 @@ def parse_args():
     p.add_argument("--head_transformer_layers", type=int, default=1)
     p.add_argument("--head_transformer_heads", type=int, default=4)
     p.add_argument("--head_transformer_dropout", type=float, default=0.1)
+    p.add_argument("--head_linear", action="store_true",
+                   help="Use a pure linear head (disable conv/transformer head blocks).")
 
     p.add_argument("--aux_blank_weight", type=float, default=0.0,
                    help="Optional auxiliary loss weight to penalize blank-dominated frames.")
@@ -538,6 +540,11 @@ def main():
 
         _os.environ["CTC_CRF_STATE_LEN"] = str(args.ctc_crf_state_len)
         num_classes = crf_backend.crf_num_classes(args.ctc_crf_state_len)
+
+    if args.head_linear:
+        args.head_layers = 0
+        args.head_use_transformer = False
+        args.head_disable_pointwise = True
 
     base_model = BasecallModel(
         model_path=args.model_name_or_path,
