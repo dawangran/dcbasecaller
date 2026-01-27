@@ -122,6 +122,7 @@ basecall-train \
 - `--head_transformer_layers`, `--head_transformer_heads`, `--head_transformer_dropout`.
 - `--head_linear`: use a pure linear head (disable conv and transformer blocks; uses LayerNorm + Linear only).
 
+
 **Optimization**
 - `--batch_size`, `--num_epochs`, `--lr`, `--weight_decay`, `--warmup_ratio`, `--min_lr`.
 - `--aux_blank_weight`: optional penalty to discourage blank-dominated outputs.
