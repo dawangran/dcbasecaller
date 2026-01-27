@@ -244,7 +244,8 @@ def load_checkpoint(path: str,
 
 def train_one_epoch(model, ctc_loss, data_loader, optimizer, scheduler,
                     device, rank: int, log_interval: int, use_wandb: bool,
-                    aux_blank_weight: float, loss_type: str):
+                    aux_blank_weight: float, loss_type: str,
+                    ctc_crf_pad_blank: bool, ctc_crf_blank_score: float):
     model.train()
     total_loss, n_batches = 0.0, 0
 
@@ -278,6 +279,8 @@ def train_one_epoch(model, ctc_loss, data_loader, optimizer, scheduler,
                 input_lengths,
                 target_lengths,
                 blank_idx=BLANK_IDX,
+                pad_blank=ctc_crf_pad_blank,
+                blank_score=ctc_crf_blank_score,
             )
         else:
             loss = ctc_loss(logits_tbc.log_softmax(2), target_labels, input_lengths, target_lengths)
@@ -306,7 +309,8 @@ def train_one_epoch(model, ctc_loss, data_loader, optimizer, scheduler,
 
 
 @torch.no_grad()
-def eval_one_epoch(model, ctc_loss, data_loader, device, rank: int, split_name: str, loss_type: str):
+def eval_one_epoch(model, ctc_loss, data_loader, device, rank: int, split_name: str, loss_type: str,
+                   ctc_crf_pad_blank: bool, ctc_crf_blank_score: float):
     model.eval()
     total_loss, n_batches = 0.0, 0
     total_pbma, n_pbma = 0.0, 0
@@ -338,6 +342,8 @@ def eval_one_epoch(model, ctc_loss, data_loader, device, rank: int, split_name: 
                 input_lengths,
                 target_lengths,
                 blank_idx=BLANK_IDX,
+                pad_blank=ctc_crf_pad_blank,
+                blank_score=ctc_crf_blank_score,
             )
         else:
             loss = ctc_loss(logits_tbc.log_softmax(2), target_labels, input_lengths, target_lengths)
@@ -349,6 +355,8 @@ def eval_one_epoch(model, ctc_loss, data_loader, device, rank: int, split_name: 
             decoder="crf" if loss_type == "ctc-crf" else "greedy",
             blank_idx=BLANK_IDX,
             input_lengths=input_lengths,
+            ctc_crf_pad_blank=ctc_crf_pad_blank,
+            ctc_crf_blank_score=ctc_crf_blank_score,
         )
         pbma = batch_pbma(pred_seqs, batch["target_seqs"])
         total_pbma += float(pbma)
@@ -513,6 +521,10 @@ def parse_args():
                    help="Training loss type. Use ctc-crf only if a compatible ctc_crf library is installed.")
     p.add_argument("--ctc_crf_state_len", type=int, default=5,
                    help="State length for Bonito CTC-CRF (used to set output classes).")
+    p.add_argument("--ctc_crf_pad_blank", action="store_true",
+                   help="Pad a fixed blank score onto CTC-CRF logits before loss/decode (expects head without blank).")
+    p.add_argument("--ctc_crf_blank_score", type=float, default=0.0,
+                   help="Blank score used when padding CTC-CRF logits (see --ctc_crf_pad_blank).")
 
 
     return p.parse_args()
@@ -534,12 +546,22 @@ def main():
 
     # ---- model (先建模型拿 tokenizer，保持原数据逻辑) ----
     num_classes = None
+    head_blank_idx = 0
     if args.loss_type == "ctc-crf":
         import os as _os
         from . import ctc_crf as crf_backend
 
         _os.environ["CTC_CRF_STATE_LEN"] = str(args.ctc_crf_state_len)
-        num_classes = crf_backend.crf_num_classes(args.ctc_crf_state_len)
+        if args.ctc_crf_pad_blank:
+            num_classes = crf_backend.crf_num_classes_no_blank(args.ctc_crf_state_len)
+            head_blank_idx = -1
+        else:
+            num_classes = crf_backend.crf_num_classes(args.ctc_crf_state_len)
+
+    if args.head_linear:
+        args.head_layers = 0
+        args.head_use_transformer = False
+        args.head_disable_pointwise = True
 
     if args.head_linear:
         args.head_layers = 0
@@ -562,6 +584,7 @@ def main():
         head_transformer_layers=args.head_transformer_layers,
         head_transformer_heads=args.head_transformer_heads,
         head_transformer_dropout=args.head_transformer_dropout,
+        head_blank_idx=head_blank_idx,
     ).to(device)
 
     model = base_model
@@ -752,6 +775,8 @@ def main():
             use_wandb,
             args.aux_blank_weight,
             args.loss_type,
+            args.ctc_crf_pad_blank,
+            args.ctc_crf_blank_score,
         )
         train_losses.append(tr_loss)
 
@@ -762,7 +787,17 @@ def main():
         if val_loader is not None:
             if val_sampler is not None:
                 val_sampler.set_epoch(epoch)
-            val_loss, val_pbma = eval_one_epoch(model, ctc_loss, val_loader, device, rank, "val", args.loss_type)
+            val_loss, val_pbma = eval_one_epoch(
+                model,
+                ctc_loss,
+                val_loader,
+                device,
+                rank,
+                "val",
+                args.loss_type,
+                args.ctc_crf_pad_blank,
+                args.ctc_crf_blank_score,
+            )
             val_losses.append(val_loss)
             val_pbmas.append(val_pbma)
 
@@ -805,7 +840,17 @@ def main():
 
     # ---- test ----
     if test_loader is not None:
-        test_loss, test_pbma = eval_one_epoch(model, ctc_loss, test_loader, device, rank, "test", args.loss_type)
+        test_loss, test_pbma = eval_one_epoch(
+            model,
+            ctc_loss,
+            test_loader,
+            device,
+            rank,
+            "test",
+            args.loss_type,
+            args.ctc_crf_pad_blank,
+            args.ctc_crf_blank_score,
+        )
         if is_main_process(rank):
             logger.info(f"[Test] loss={test_loss:.4f} pbma={test_pbma:.4f}")
             if use_wandb and wandb is not None:

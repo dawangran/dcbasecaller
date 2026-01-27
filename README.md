@@ -128,6 +128,8 @@ basecall-train \
 - `--aux_blank_weight`: optional penalty to discourage blank-dominated outputs.
 - `--loss_type`: `ctc` (default) or `ctc-crf` (requires k2 or ont-koi + `ctc_crf.py` adapter).
 - `--ctc_crf_state_len`: Bonito CTC-CRF state length (controls CRF head output classes).
+- `--ctc_crf_pad_blank`: pad a fixed blank score onto CTC-CRF logits (use when the head omits blank scores).
+- `--ctc_crf_blank_score`: blank score used by `--ctc_crf_pad_blank` (default: 0.0).
 
 **Checkpointing & loading**
 - `--resume_ckpt`: resume from `ckpt_last.pt` (model/optim/sched/epoch/best_pbma).

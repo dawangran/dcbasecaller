@@ -272,11 +272,19 @@ def main():
     ap.add_argument("--overlap", type=int, default=128)
     ap.add_argument("--overlap_bases", type=int, default=None)
     ap.add_argument("--hidden_layer", type=int, default=-1)
+    ap.add_argument("--ctc_crf_state_len", type=int, default=5,
+                    help="State length for Bonito CTC-CRF (used for CRF decoder).")
+    ap.add_argument("--ctc_crf_pad_blank", action="store_true",
+                    help="Pad a fixed blank score onto CTC-CRF logits before decoding.")
+    ap.add_argument("--ctc_crf_blank_score", type=float, default=0.0,
+                    help="Blank score used when padding CTC-CRF logits.")
     args = ap.parse_args()
 
     seed_everything(42)
     device = torch.device(args.device)
     use_amp = args.amp and device.type == "cuda"
+    if args.decoder == "crf":
+        os.environ["CTC_CRF_STATE_LEN"] = str(args.ctc_crf_state_len)
 
     state = torch.load(args.ckpt, map_location="cpu")
     # 兼容 ckpt 格式：{"model": ...} / {"model_state_dict": ...} / {"state_dict": ...} / 直接 state_dict
@@ -358,6 +366,8 @@ def main():
                         beam_width=args.beam_width,
                         blank_idx=BLANK_IDX,
                         input_lengths=input_lengths,
+                        ctc_crf_pad_blank=args.ctc_crf_pad_blank,
+                        ctc_crf_blank_score=args.ctc_crf_blank_score,
                     )
                     for ids in pred_ids:
                         seq = "".join(ID2BASE.get(i, "N") for i in ids)
