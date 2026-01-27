@@ -120,12 +120,17 @@ basecall-train \
 - `--head_disable_pointwise`: disable pointwise conv (default is enabled).
 - `--head_use_transformer`: add transformer layers in head.
 - `--head_transformer_layers`, `--head_transformer_heads`, `--head_transformer_dropout`.
+- `--head_linear`: use a pure linear head (sets `head_layers=0`, disables pointwise/transformer blocks; uses LayerNorm + Linear only).
+- `--head_output_activation`: optional activation for head logits (e.g. `tanh` for Bonito-style scaling).
+- `--head_output_scale`: optional scalar multiplier for head logits (applied after activation).
 
 **Optimization**
 - `--batch_size`, `--num_epochs`, `--lr`, `--weight_decay`, `--warmup_ratio`, `--min_lr`.
 - `--aux_blank_weight`: optional penalty to discourage blank-dominated outputs.
 - `--loss_type`: `ctc` (default) or `ctc-crf` (requires k2 or ont-koi + `ctc_crf.py` adapter).
 - `--ctc_crf_state_len`: Bonito CTC-CRF state length (controls CRF head output classes).
+- `--ctc_crf_pad_blank`: pad a fixed blank score onto CTC-CRF logits (use when the head omits blank scores).
+- `--ctc_crf_blank_score`: blank score used by `--ctc_crf_pad_blank` (default: 0.0).
 
 **Checkpointing & loading**
 - `--resume_ckpt`: resume from `ckpt_last.pt` (model/optim/sched/epoch/best_pbma).

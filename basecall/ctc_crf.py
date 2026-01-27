@@ -30,6 +30,12 @@ def crf_num_classes(state_len: int, alphabet: List[str] | None = None) -> int:
     return len(alphabet) * (n_base ** state_len)
 
 
+def crf_num_classes_no_blank(state_len: int, alphabet: List[str] | None = None) -> int:
+    alphabet = alphabet or _alphabet()
+    n_base = len(alphabet[1:])
+    return (n_base ** state_len) * n_base
+
+
 def _prepare_targets(
     targets: torch.Tensor,
     target_lengths: torch.Tensor,
