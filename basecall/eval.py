@@ -272,8 +272,18 @@ def main() -> None:
                     help="Scan subfolders for .jsonl.gz or tokens/reference .npy inputs.")
     ap.add_argument("--model_name_or_path", required=True)
     ap.add_argument("--ckpt", required=True)
-    ap.add_argument("--decoder", choices=["greedy", "beam", "crf"], default="greedy")
+    ap.add_argument("--decoder", choices=["greedy", "beam", "beam_search", "crf"], default="greedy")
     ap.add_argument("--beam_width", type=int, default=5)
+    ap.add_argument("--koi_beam_cut", type=float, default=100.0,
+                    help="Beam cut value for Koi beam_search decoding.")
+    ap.add_argument("--koi_scale", type=float, default=1.0,
+                    help="Scale applied to scores for Koi beam_search decoding.")
+    ap.add_argument("--koi_offset", type=float, default=0.0,
+                    help="Offset applied to scores for Koi beam_search decoding.")
+    ap.add_argument("--koi_blank_score", type=float, default=2.0,
+                    help="Blank score used for Koi beam_search decoding.")
+    ap.add_argument("--koi_reverse", action="store_true",
+                    help="Reverse sequence output for Koi beam_search decoding.")
     ap.add_argument("--batch_size", type=int, default=4)
     ap.add_argument("--num_workers", type=int, default=0)
     ap.add_argument("--out_dir", type=str, default="eval_out")
@@ -381,6 +391,11 @@ def main() -> None:
             input_lengths=batch.get("input_lengths"),
             ctc_crf_pad_blank=args.ctc_crf_pad_blank,
             ctc_crf_blank_score=args.ctc_crf_blank_score,
+            koi_beam_cut=args.koi_beam_cut,
+            koi_scale=args.koi_scale,
+            koi_offset=args.koi_offset,
+            koi_blank_score=args.koi_blank_score,
+            koi_reverse=args.koi_reverse,
         )
         ref_ids = batch["target_seqs"]
 
