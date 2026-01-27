@@ -16,7 +16,7 @@ class BasecallHead(nn.Module):
         self,
         hidden_size: int,
         num_classes: int | None = NUM_CLASSES,
-        blank_idx: int = 0,
+        blank_idx: int | None = 0,
         kernel_size: int = 5,
         num_layers: int = 2,
         dropout: float = 0.1,
@@ -28,24 +28,27 @@ class BasecallHead(nn.Module):
     ):
         super().__init__()
         self.norm = nn.LayerNorm(hidden_size)
-        if kernel_size % 2 == 0:
-            raise ValueError("kernel_size must be odd for symmetric padding.")
-        padding = kernel_size // 2
+        if num_layers < 0:
+            raise ValueError("num_layers must be >= 0.")
         self.blocks = nn.ModuleList()
-        for _ in range(max(1, num_layers)):
-            dwconv = nn.Conv1d(
-                hidden_size,
-                hidden_size,
-                kernel_size=kernel_size,
-                padding=padding,
-                groups=hidden_size,
-            )
-            pwconv = (
-                nn.Conv1d(hidden_size, hidden_size, kernel_size=1)
-                if use_pointwise
-                else nn.Identity()
-            )
-            self.blocks.append(nn.Sequential(dwconv, pwconv))
+        if num_layers > 0:
+            if kernel_size % 2 == 0:
+                raise ValueError("kernel_size must be odd for symmetric padding.")
+            padding = kernel_size // 2
+            for _ in range(num_layers):
+                dwconv = nn.Conv1d(
+                    hidden_size,
+                    hidden_size,
+                    kernel_size=kernel_size,
+                    padding=padding,
+                    groups=hidden_size,
+                )
+                pwconv = (
+                    nn.Conv1d(hidden_size, hidden_size, kernel_size=1)
+                    if use_pointwise
+                    else nn.Identity()
+                )
+                self.blocks.append(nn.Sequential(dwconv, pwconv))
         self.act = nn.GELU()
         self.dropout = nn.Dropout(dropout)
         self.transformer = None
@@ -61,7 +64,7 @@ class BasecallHead(nn.Module):
         self.proj = nn.Linear(hidden_size, num_classes)
 
         # discourage "all-blank" early collapse
-        if self.proj.bias is not None and 0 <= blank_idx < num_classes:
+        if self.proj.bias is not None and blank_idx is not None and 0 <= blank_idx < num_classes:
             with torch.no_grad():
                 self.proj.bias[blank_idx] = -2.0
 
@@ -103,6 +106,7 @@ class BasecallModel(nn.Module):
         head_transformer_layers: int = 1,
         head_transformer_heads: int = 4,
         head_transformer_dropout: float = 0.1,
+        head_blank_idx: int | None = 0,
     ):
         super().__init__()
         self.hidden_layer = hidden_layer
@@ -166,6 +170,7 @@ class BasecallModel(nn.Module):
         self.base_head = BasecallHead(
             hidden_size=hidden_size,
             num_classes=num_classes,
+            blank_idx=head_blank_idx,
             kernel_size=head_kernel_size,
             num_layers=head_layers,
             dropout=head_dropout,

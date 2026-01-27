@@ -5,6 +5,7 @@ import os
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 import matplotlib.pyplot as plt
 from matplotlib.ticker import MaxNLocator
 import edlib
@@ -134,6 +135,8 @@ def ctc_crf_decode(
     logits_tbc: torch.Tensor,
     blank_idx: int = BLANK_IDX,
     input_lengths: Optional[torch.Tensor] = None,
+    pad_blank: bool = False,
+    blank_score: float = 0.0,
 ) -> List[List[int]]:
     try:
         from . import ctc_crf  # type: ignore
@@ -147,6 +150,9 @@ def ctc_crf_decode(
         raise ImportError(
             "ctc_crf.decode not found. Provide a CTC-CRF library with a decode(logits, blank_idx) API."
         )
+
+    if pad_blank:
+        logits_tbc = _pad_ctc_crf_blank(logits_tbc, blank_score)
 
     if input_lengths is None:
         return ctc_crf.decode(logits_tbc, blank_idx=blank_idx)
@@ -167,6 +173,8 @@ def ctc_decode(
     beam_width: int = 5,
     blank_idx: int = BLANK_IDX,
     input_lengths: Optional[torch.Tensor] = None,
+    ctc_crf_pad_blank: bool = False,
+    ctc_crf_blank_score: float = 0.0,
 ) -> List[List[int]]:
     if decoder == "greedy":
         return ctc_greedy_decode(logits_tbc, blank_idx=blank_idx, input_lengths=input_lengths)
@@ -178,7 +186,13 @@ def ctc_decode(
             input_lengths=input_lengths,
         )
     if decoder == "crf":
-        return ctc_crf_decode(logits_tbc, blank_idx=blank_idx, input_lengths=input_lengths)
+        return ctc_crf_decode(
+            logits_tbc,
+            blank_idx=blank_idx,
+            input_lengths=input_lengths,
+            pad_blank=ctc_crf_pad_blank,
+            blank_score=ctc_crf_blank_score,
+        )
     raise ValueError(f"Unknown decoder: {decoder}")
 
 
@@ -188,6 +202,8 @@ def ctc_crf_loss(
     input_lengths: torch.Tensor,
     target_lengths: torch.Tensor,
     blank_idx: int = BLANK_IDX,
+    pad_blank: bool = False,
+    blank_score: float = 0.0,
 ) -> torch.Tensor:
     try:
         from . import ctc_crf  # type: ignore
@@ -203,9 +219,32 @@ def ctc_crf_loss(
             "ctc_crf_loss(logits_tbc, targets, input_lengths, target_lengths, blank_idx)."
         )
 
+    if pad_blank:
+        logits_tbc = _pad_ctc_crf_blank(logits_tbc, blank_score)
+
     return ctc_crf.ctc_crf_loss(
         logits_tbc, target_labels, input_lengths, target_lengths, blank_idx=blank_idx
     )
+
+
+def _pad_ctc_crf_blank(logits_tbc: torch.Tensor, blank_score: float) -> torch.Tensor:
+    state_len = int(os.environ.get("CTC_CRF_STATE_LEN", "5"))
+    n_base = len(ID2BASE) - 1
+    if n_base <= 0:
+        raise ValueError("CTC-CRF alphabet must include at least one non-blank base.")
+    no_blank_dim = (n_base ** state_len) * n_base
+    full_dim = (n_base + 1) * (n_base ** state_len)
+    if logits_tbc.size(-1) == full_dim:
+        return logits_tbc
+    if logits_tbc.size(-1) != no_blank_dim:
+        raise ValueError(
+            f"CTC-CRF logits dim mismatch: got {logits_tbc.size(-1)}, "
+            f"expected {no_blank_dim} (no-blank) or {full_dim} (full)."
+        )
+    t_len, batch, _ = logits_tbc.shape
+    reshaped = logits_tbc.view(t_len, batch, no_blank_dim // n_base, n_base)
+    padded = F.pad(reshaped, (1, 0), value=float(blank_score))
+    return padded.view(t_len, batch, -1)
 
 
 # ---------------- PBMA ----------------
