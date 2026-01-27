@@ -137,16 +137,11 @@ class CTC_CRF:
                 return stay_scores, move_scores
 
             def ctc_loss(self, scores, targets, target_lengths, loss_clip=None, reduction="mean", normalise_scores=True):
-                scores = scores.to(torch.float32)
-                logz_total = self.logZ(scores)
                 if normalise_scores:
-                    scores = scores - logz_total[:, None] / len(scores)
+                    scores = self.normalise(scores)
                 stay_scores, move_scores = self.prepare_ctc_scores(scores, targets)
-                logz_target = logZ_cu(stay_scores, move_scores, target_lengths + 1 - self.state_len)
-                if normalise_scores:
-                    loss = -(logz_target / target_lengths)
-                else:
-                    loss = (logz_total - logz_target) / target_lengths
+                logz = logZ_cu(stay_scores, move_scores, target_lengths + 1 - self.state_len)
+                loss = -(logz / target_lengths)
                 if loss_clip:
                     loss = torch.clamp(loss, 0.0, loss_clip)
                 if reduction == "mean":
