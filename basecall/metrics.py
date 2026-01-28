@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 from matplotlib.ticker import MaxNLocator
 import edlib
 
-from .utils import BLANK_IDX, ID2BASE
+from .utils import BLANK_IDX, ID2BASE, BASE2ID
 
 
 # ---------------- CTC 解码 ----------------
@@ -167,6 +167,49 @@ def ctc_crf_decode(
     return decoded
 
 
+def koi_beam_search_decode(
+    logits_tbc: torch.Tensor,
+    beam_width: int = 32,
+    beam_cut: float = 100.0,
+    scale: float = 1.0,
+    offset: float = 0.0,
+    blank_score: float = 2.0,
+    reverse: bool = False,
+    input_lengths: Optional[torch.Tensor] = None,
+) -> List[List[int]]:
+    try:
+        from koi.decode import beam_search, to_str  # type: ignore
+    except Exception as exc:
+        raise ImportError(
+            "Koi beam_search decoder requested but ont-koi is not installed. "
+            "Install ont-koi and ensure it matches your PyTorch/CUDA version."
+        ) from exc
+
+    if input_lengths is None:
+        lengths = [logits_tbc.shape[0]] * logits_tbc.shape[1]
+    else:
+        lengths = [min(int(x), logits_tbc.shape[0]) for x in input_lengths.cpu().tolist()]
+    decoded: List[List[int]] = []
+    for b, length in enumerate(lengths):
+        if length <= 0:
+            decoded.append([])
+            continue
+        scores = logits_tbc[:length, b : b + 1, :]
+        sequence, _qstring, _moves = beam_search(
+            scores,
+            beam_width=beam_width,
+            beam_cut=beam_cut,
+            scale=scale,
+            offset=offset,
+            blank_score=blank_score,
+        )
+        if reverse:
+            sequence = sequence[::-1]
+        seq_str = sequence if isinstance(sequence, str) else to_str(sequence)
+        decoded.append([BASE2ID.get(base, BLANK_IDX) for base in seq_str])
+    return decoded
+
+
 def ctc_decode(
     logits_tbc: torch.Tensor,
     decoder: str = "greedy",
@@ -175,6 +218,11 @@ def ctc_decode(
     input_lengths: Optional[torch.Tensor] = None,
     ctc_crf_pad_blank: bool = False,
     ctc_crf_blank_score: float = 0.0,
+    koi_beam_cut: float = 100.0,
+    koi_scale: float = 1.0,
+    koi_offset: float = 0.0,
+    koi_blank_score: float = 2.0,
+    koi_reverse: bool = False,
 ) -> List[List[int]]:
     if decoder == "greedy":
         return ctc_greedy_decode(logits_tbc, blank_idx=blank_idx, input_lengths=input_lengths)
@@ -192,6 +240,17 @@ def ctc_decode(
             input_lengths=input_lengths,
             pad_blank=ctc_crf_pad_blank,
             blank_score=ctc_crf_blank_score,
+        )
+    if decoder == "beam_search":
+        return koi_beam_search_decode(
+            logits_tbc,
+            beam_width=beam_width,
+            beam_cut=koi_beam_cut,
+            scale=koi_scale,
+            offset=koi_offset,
+            blank_score=koi_blank_score,
+            reverse=koi_reverse,
+            input_lengths=input_lengths,
         )
     raise ValueError(f"Unknown decoder: {decoder}")
 
