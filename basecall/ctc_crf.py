@@ -142,6 +142,8 @@ class CTC_CRF:
                     scores = self.normalise(scores)
                 stay_scores, move_scores = self.prepare_ctc_scores(scores, targets)
                 logz = logZ_cu(stay_scores, move_scores, target_lengths + 1 - self.state_len)
+                if normalise_scores:
+                    logz = torch.minimum(logz, logz.new_zeros(logz.shape))
                 loss = -(logz / target_lengths)
                 if loss_clip:
                     loss = torch.clamp(loss, 0.0, loss_clip)
