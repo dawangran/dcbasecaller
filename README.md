@@ -120,12 +120,18 @@ basecall-train \
 - `--head_disable_pointwise`: disable pointwise conv (default is enabled).
 - `--head_use_transformer`: add transformer layers in head.
 - `--head_transformer_layers`, `--head_transformer_heads`, `--head_transformer_dropout`.
+- `--head_linear`: use a pure linear head (sets `head_layers=0`, disables pointwise/transformer blocks; uses LayerNorm + Linear only).
+- `--head_output_activation`: optional activation for head logits (e.g. `tanh` for Bonito-style scaling).
+- `--head_output_scale`: optional scalar multiplier for head logits (applied after activation).
+
 
 **Optimization**
 - `--batch_size`, `--num_epochs`, `--lr`, `--weight_decay`, `--warmup_ratio`, `--min_lr`.
 - `--aux_blank_weight`: optional penalty to discourage blank-dominated outputs.
 - `--loss_type`: `ctc` (default) or `ctc-crf` (requires k2 or ont-koi + `ctc_crf.py` adapter).
 - `--ctc_crf_state_len`: Bonito CTC-CRF state length (controls CRF head output classes).
+- `--ctc_crf_pad_blank`: pad a fixed blank score onto CTC-CRF logits (use when the head omits blank scores).
+- `--ctc_crf_blank_score`: blank score used by `--ctc_crf_pad_blank` (default: 0.0).
 
 **Checkpointing & loading**
 - `--resume_ckpt`: resume from `ckpt_last.pt` (model/optim/sched/epoch/best_pbma).
@@ -178,8 +184,9 @@ basecall-eval \
 - `--npy_paths`: comma-separated folders or `tokens_*.npy`/`reference_*.npy` files (uses token/reference pairs).
 - `--model_name_or_path`: HuggingFace model ID or local path.
 - `--ckpt`: checkpoint path.
-- `--decoder`: `greedy`, `beam`, or `crf` (crf requires k2 or ont-koi + `ctc_crf.py` adapter).
+- `--decoder`: `greedy`, `beam`, `beam_search`, or `crf` (crf requires ont-koi + `ctc_crf.py` adapter).
 - `--beam_width`: beam width for `beam` decoder.
+- `--koi_beam_cut`, `--koi_scale`, `--koi_offset`, `--koi_blank_score`, `--koi_reverse`: parameters for the Koi `beam_search` decoder.
 - `--batch_size`, `--num_workers`: eval dataloader controls.
 - `--out_dir`: output directory for metrics/plots.
 - `--num_visualize`: number of reads to visualize (default: 100).
@@ -192,23 +199,42 @@ basecall-eval \
 ### Outputs
 
 - `eval_out/metrics.json`: PBMA, read-level PBMA, exact-match rate, error ratios, base-level error patterns (mismatch matrix + insertion/deletion base counts), length histograms (pred/ref), and deletion position distribution.
-- `eval_out/heatmap.png`: overall alignment heatmap.
-- `eval_out/aligned_reads/read_XXX.png`: per-read aligned heatmaps.
-- `eval_out/sequences.jsonl`: per-read predicted/reference sequences for visualization samples.
-- `eval_out/preds.fastq`: optional FASTQ output for predicted sequences.
 
 ---
 
-## 4) Inference (jsonl -> fastq)
+## 4) Inference
+
+### Basic usage
 
 ```bash
 basecall-infer \
-  --ckpt ckpt_best.pt \
+  --jsonl_gz /path/to/reads.jsonl.gz \
   --model_name_or_path <hf-model> \
-  --jsonl_gz reads.jsonl.gz \
-  --out out.fastq \
-  --decoder greedy
+  --ckpt ckpt_best.pt \
+  --decoder greedy \
+  --out outputs/preds.fastq
 ```
+
+### Inference decoders
+
+- `greedy`: Bonito-style greedy decoding with per-base Q scores.
+- `beam`: CPU CTC beam search (simple N-best beam).
+- `beam_search`: Koi/ont-koi beam search with score scaling controls.
+- `crf`: Bonito CTC-CRF Viterbi decoding (requires ont-koi).
+
+### Decoder parameters (for `beam_search`)
+
+- `--koi_beam_cut`: beam cut value (default: 100.0).
+- `--koi_scale`: scale applied to scores (default: 1.0).
+- `--koi_offset`: offset applied to scores (default: 0.0).
+- `--koi_blank_score`: blank score used by the decoder (default: 2.0).
+- `--koi_reverse`: reverse output sequence (useful for reverse-complemented models).
+
+### Notes for Bonito-style CTC-CRF training/inference
+
+- Use `--loss_type ctc-crf` with `--ctc_crf_state_len` during training to match the CTC-CRF head size.
+- If you trained with `--ctc_crf_pad_blank`, keep it on for evaluation/inference so the blank score is padded consistently.
+- For Bonito-style logit scaling, use `--head_output_activation tanh` and `--head_output_scale 5` so scores match the expected range.
 
 ### All inference arguments
 
@@ -224,9 +250,10 @@ basecall-infer \
 - `--hidden_layer`: which backbone hidden state to use (default: -1).
 
 **Decoding**
-- `--decoder`: `greedy`, `beam`, or `crf` (crf requires k2 or ont-koi + `ctc_crf.py` adapter).
+- `--decoder`: `greedy`, `beam`, `beam_search`, or `crf` (crf requires ont-koi + `ctc_crf.py` adapter).
 - `--beam_width`: beam search width.
 - `--beam_q`: fixed Q score for non-greedy output.
+- `--koi_beam_cut`, `--koi_scale`, `--koi_offset`, `--koi_blank_score`, `--koi_reverse`: Koi beam-search parameters.
 
 **Chunking**
 - Long `text` fields are split into token chunks, decoded independently, then concatenated.
@@ -239,8 +266,7 @@ basecall-infer \
 - Ensure the **tokenization rules** used during training match the inference signal quantization logic.
 - For nested data layouts, use `--recursive`.
 - For best accuracy, consider beam search during evaluation and inference.
-- CTC-CRF options require k2 or ont-koi and the provided `ctc_crf.py` adapter.
-- Set `CTC_CRF_BACKEND=koi` to enable koi if available; default is k2.
+- CTC-CRF options require ont-koi and the provided `ctc_crf.py` adapter.
 
 ## 5.1) Inspect checkpoint head config
 

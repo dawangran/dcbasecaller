@@ -30,6 +30,12 @@ def crf_num_classes(state_len: int, alphabet: List[str] | None = None) -> int:
     return len(alphabet) * (n_base ** state_len)
 
 
+def crf_num_classes_no_blank(state_len: int, alphabet: List[str] | None = None) -> int:
+    alphabet = alphabet or _alphabet()
+    n_base = len(alphabet[1:])
+    return (n_base ** state_len) * n_base
+
+
 def _prepare_targets(
     targets: torch.Tensor,
     target_lengths: torch.Tensor,
@@ -131,10 +137,13 @@ class CTC_CRF:
                 return stay_scores, move_scores
 
             def ctc_loss(self, scores, targets, target_lengths, loss_clip=None, reduction="mean", normalise_scores=True):
+                scores = scores.to(torch.float32)
                 if normalise_scores:
                     scores = self.normalise(scores)
                 stay_scores, move_scores = self.prepare_ctc_scores(scores, targets)
                 logz = logZ_cu(stay_scores, move_scores, target_lengths + 1 - self.state_len)
+                if normalise_scores:
+                    logz = torch.minimum(logz, logz.new_zeros(logz.shape))
                 loss = -(logz / target_lengths)
                 if loss_clip:
                     loss = torch.clamp(loss, 0.0, loss_clip)
