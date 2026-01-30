@@ -75,7 +75,7 @@ def infer_head_config_from_state_dict(
                 if len(parts) > 2 and parts[2].isdigit():
                     indices.add(int(parts[2]))
         if not indices:
-            return default_layers
+            return 0
         return max(indices) + 1
 
     def _infer_kernel_size() -> int:
@@ -85,6 +85,8 @@ def infer_head_config_from_state_dict(
         return default_kernel
 
     def _infer_use_pointwise() -> bool:
+        if not any(key.startswith("base_head.blocks.") for key in state_dict.keys()):
+            return False
         if "base_head.blocks.0.1.weight" in state_dict:
             return True
         if any(key.startswith("base_head.blocks.") and ".1.weight" in key for key in state_dict):
