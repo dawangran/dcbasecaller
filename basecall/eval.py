@@ -244,6 +244,11 @@ def main() -> None:
     seed_everything(42)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     use_amp = device.type == "cuda"
+    if args.ctc_crf_pad_blank and args.decoder != "crf":
+        raise ValueError(
+            "ctc_crf_pad_blank=True produces no-blank logits; use --decoder crf "
+            "or disable --ctc_crf_pad_blank for CTC/Koi decoders."
+        )
     if args.decoder == "crf":
         os.environ["CTC_CRF_STATE_LEN"] = str(args.ctc_crf_state_len)
 
