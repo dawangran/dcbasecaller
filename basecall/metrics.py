@@ -325,6 +325,33 @@ def _parse_cigar(cigar: str) -> List[str]:
     return ops
 
 
+def _alignment_counts(pred_seq: str, ref_seq: str) -> Dict[str, int]:
+    """
+    统计对齐结果中的 '=' 'X' 'I' 'D' 数量。
+    返回 dict: match, mismatch, ins, del
+    """
+    counts = {"match": 0, "mismatch": 0, "ins": 0, "del": 0}
+    if not ref_seq and not pred_seq:
+        return counts
+
+    result = edlib.align(pred_seq, ref_seq, task="path")
+    cigar = result.get("cigar", None)
+    if not cigar:
+        return counts
+
+    ops = _parse_cigar(cigar)
+    for op in ops:
+        if op in {"=", "M"}:
+            counts["match"] += 1
+        elif op == "X":
+            counts["mismatch"] += 1
+        elif op == "D":
+            counts["del"] += 1
+        elif op == "I":
+            counts["ins"] += 1
+    return counts
+
+
 def _pbma_counts(pred_seq: str, ref_seq: str) -> Tuple[int, int]:
     """
     返回 (match, ref_len)，其中 ref_len = match + mismatch + del.
@@ -335,30 +362,49 @@ def _pbma_counts(pred_seq: str, ref_seq: str) -> Tuple[int, int]:
     if not pred_seq:
         return 0, len(ref_seq)
 
-    result = edlib.align(pred_seq, ref_seq, task="path")
-    cigar = result.get("cigar", None)
-    if cigar is None:
-        return 0, len(ref_seq)
-
-    ops = _parse_cigar(cigar)
-    match = mismatch = dele = 0
-
-    for op in ops:
-        if op in {"=", "M"}:
-            match += 1
-        elif op == "X":
-            mismatch += 1
-        elif op == "D":
-            dele += 1
-
-    ref_len = match + mismatch + dele
-    return match, ref_len
+    counts = _alignment_counts(pred_seq, ref_seq)
+    ref_len = counts["match"] + counts["mismatch"] + counts["del"]
+    return counts["match"], ref_len
 
 
 def cal_per_base_match_accuracy(pred_seq: str, ref_seq: str) -> float:
     """PBMA = match / ref_len (ref_len = match + mismatch + del)"""
     match, ref_len = _pbma_counts(pred_seq, ref_seq)
     return match / ref_len if ref_len > 0 else 0.0
+
+
+def cal_bonito_accuracy(
+    pred_seq: str,
+    ref_seq: str,
+    balanced: bool = False,
+    min_coverage: float = 0.0,
+) -> float:
+    """
+    Bonito-style accuracy:
+      - default: match / (match + ins + mismatch + del)
+      - balanced: (match - ins) / (match + mismatch + del)
+    结果返回百分比（0-100）。
+    """
+    if not pred_seq or not ref_seq:
+        return 0.0
+
+    counts = _alignment_counts(pred_seq, ref_seq)
+    query_len = counts["match"] + counts["mismatch"] + counts["ins"]
+    ref_len = counts["match"] + counts["mismatch"] + counts["del"]
+
+    if ref_len <= 0:
+        return 0.0
+    r_coverage = ref_len / max(len(ref_seq), 1)
+    if r_coverage < min_coverage:
+        return 0.0
+
+    if balanced:
+        denom = counts["match"] + counts["mismatch"] + counts["del"]
+        score = (counts["match"] - counts["ins"]) / denom if denom > 0 else 0.0
+    else:
+        denom = counts["match"] + counts["mismatch"] + counts["del"] + counts["ins"]
+        score = counts["match"] / denom if denom > 0 else 0.0
+    return float(score * 100.0)
 
 
 def batch_pbma(
@@ -381,6 +427,26 @@ def batch_pbma(
     return float(total_match) / float(total_ref) if total_ref > 0 else 0.0
 
 
+def batch_bonito_accuracy(
+    pred_seqs: List[List[int]],
+    ref_seqs: List[List[int]],
+    balanced: bool = False,
+    min_coverage: float = 0.0,
+) -> float:
+    """
+    Bonito-style accuracy across a batch, averaged by per-read accuracy.
+    返回百分比（0-100）。
+    """
+    if not pred_seqs or not ref_seqs:
+        return 0.0
+    scores = []
+    for p_ids, r_ids in zip(pred_seqs, ref_seqs):
+        p_str = "".join(ID2BASE.get(i, "N") for i in p_ids)
+        r_str = "".join(ID2BASE.get(i, "N") for i in r_ids)
+        scores.append(cal_bonito_accuracy(p_str, r_str, balanced=balanced, min_coverage=min_coverage))
+    return float(np.mean(scores)) if scores else 0.0
+
+
 # ---------------- Inspect batch ----------------
 
 def inspect_batch(
@@ -389,12 +455,14 @@ def inspect_batch(
     device: torch.device,
     num_reads: int = 5,
     max_len: int = 200,
+    acc_balanced: bool = False,
+    acc_min_coverage: float = 0.0,
 ):
     """
     从 data_loader 中取一个 batch, 随机挑 num_reads 条:
       - 打印 True 序列
       - 打印 Pred 序列 (CTC 解码后)
-      - 打印 PBMA
+      - 打印 Accuracy
     """
     from .utils import ID2BASE  # 再次导入，防止循环引用
 
@@ -431,14 +499,19 @@ def inspect_batch(
         p_str = "".join(ID2BASE.get(x, "N") for x in p_ids)
         t_str = "".join(ID2BASE.get(x, "N") for x in t_ids)
 
-        pbma = cal_per_base_match_accuracy(p_str, t_str)
+        acc = cal_bonito_accuracy(
+            p_str,
+            t_str,
+            balanced=acc_balanced,
+            min_coverage=acc_min_coverage,
+        )
 
         p_show = p_str[:max_len]
         t_show = t_str[:max_len]
 
         print(f"\n--- Read {i} (batch idx={idx}) ---")
         print(f"True length: {len(t_str)}, Pred length: {len(p_str)}")
-        print(f"PBMA: {pbma:.4f}")
+        print(f"Accuracy: {acc:.4f}")
         print(f"TRUE: {t_show}{'...' if len(t_str) > max_len else ''}")
         print(f"PRED: {p_show}{'...' if len(p_str) > max_len else ''}")
     print("===== End Inspect =====\n")
@@ -449,24 +522,24 @@ def inspect_batch(
 def plot_curves(
     train_losses: List[float],
     val_losses: List[float],
-    val_pbmas: List[float],
+    val_accs: List[float],
     save_path: Optional[str] = None,
 ):
-    """画 Loss + PBMA 曲线"""
-    max_len = min(len(train_losses), len(val_losses), len(val_pbmas))
+    """画 Loss + Accuracy 曲线"""
+    max_len = min(len(train_losses), len(val_losses), len(val_accs))
     if max_len == 0:
         print("[plot_curves] Empty metrics.")
         return
 
     train_losses = train_losses[:max_len]
     val_losses = val_losses[:max_len]
-    val_pbmas = val_pbmas[:max_len]
+    val_accs = val_accs[:max_len]
 
     epochs = range(1, max_len + 1)
 
     fig, ax1 = plt.subplots(figsize=(8, 5))
     fig.suptitle(
-        "Training Metrics: Loss & Validation PBMA",
+        "Training Metrics: Loss & Validation Accuracy",
         fontsize=14,
         fontweight="bold",
     )
@@ -499,11 +572,11 @@ def plot_curves(
     # PBMA on twin axis
     ax2 = ax1.twinx()
     color_acc = "#2ca02c"
-    ax2.set_ylabel("Validation PBMA", color=color_acc, fontsize=12)
+    ax2.set_ylabel("Validation Accuracy", color=color_acc, fontsize=12)
     line3 = ax2.plot(
         epochs,
-        val_pbmas,
-        label="Val PBMA",
+        val_accs,
+        label="Val Acc",
         color=color_acc,
         linestyle=":",
         linewidth=2,
@@ -538,18 +611,18 @@ def plot_curves(
 def save_metrics_csv(
     train_losses: List[float],
     val_losses: List[float],
-    val_pbmas: List[float],
+    val_accs: List[float],
     csv_path: str,
 ):
     os.makedirs(os.path.dirname(csv_path), exist_ok=True)
     with open(csv_path, "w", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(["epoch", "train_loss", "val_loss", "val_pbma"])
+        writer.writerow(["epoch", "train_loss", "val_loss", "val_acc"])
         for e, tr, vl, pa in zip(
             range(1, len(train_losses) + 1),
             train_losses,
             val_losses,
-            val_pbmas,
+            val_accs,
         ):
             writer.writerow([e, tr, vl, pa])
     print(f"[Metrics] Saved to {csv_path}")

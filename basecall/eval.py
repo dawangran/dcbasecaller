@@ -2,7 +2,7 @@
 """
 eval.py
 
-Evaluate jsonl.gz reads and report PBMA + error type proportions.
+Evaluate jsonl.gz reads and report accuracy + error type proportions.
 Also export alignment heatmaps for a few reads.
 
 Example:
@@ -37,7 +37,7 @@ from .data_multifolder import (
     MultiNpySignalRefDataset,
     create_collate_fn,
 )
-from .metrics import ctc_decode, batch_pbma, cal_per_base_match_accuracy
+from .metrics import ctc_decode, batch_bonito_accuracy, cal_bonito_accuracy
 from .model import BasecallModel
 from .utils import BLANK_IDX, ID2BASE, seed_everything, infer_head_config_from_state_dict, resolve_input_lengths
 from .callback import plot_alignment_heatmap, plot_aligned_heatmap_png, align_sequences_indel_aware
@@ -235,6 +235,10 @@ def main() -> None:
                     help="Pad a fixed blank score onto CTC-CRF logits before decoding.")
     ap.add_argument("--ctc_crf_blank_score", type=float, default=0.0,
                     help="Blank score used when padding CTC-CRF logits.")
+    ap.add_argument("--acc_balanced", action="store_true",
+                    help="Use Bonito balanced accuracy: (match - ins) / (match + mismatch + del).")
+    ap.add_argument("--acc_min_coverage", type=float, default=0.0,
+                    help="Minimum reference coverage required to count a read for accuracy.")
     args = ap.parse_args()
 
     seed_everything(42)
@@ -289,8 +293,8 @@ def main() -> None:
     )
 
     total_counts = {"match": 0, "mismatch": 0, "ins": 0, "del": 0}
-    pbma_scores: List[float] = []
-    per_read_pbma: List[float] = []
+    acc_scores: List[float] = []
+    per_read_acc: List[float] = []
     exact_match = 0
     pred_seq_samples: List[str] = []
     ref_seq_samples: List[str] = []
@@ -337,8 +341,13 @@ def main() -> None:
         )
         ref_ids = batch["target_seqs"]
 
-        pbma = batch_pbma(pred_ids, ref_ids)
-        pbma_scores.append(pbma)
+        acc = batch_bonito_accuracy(
+            pred_ids,
+            ref_ids,
+            balanced=args.acc_balanced,
+            min_coverage=args.acc_min_coverage,
+        )
+        acc_scores.append(acc)
 
         for pred, ref in zip(pred_ids, ref_ids):
             read_idx += 1
@@ -346,8 +355,13 @@ def main() -> None:
             ref_seq = "".join(ID2BASE.get(i, "N") for i in ref)
             counts = error_counts(pred_seq, ref_seq)
             total_counts = merge_counts(total_counts, counts)
-            pbma_read = cal_per_base_match_accuracy(pred_seq, ref_seq)
-            per_read_pbma.append(pbma_read)
+            acc_read = cal_bonito_accuracy(
+                pred_seq,
+                ref_seq,
+                balanced=args.acc_balanced,
+                min_coverage=args.acc_min_coverage,
+            )
+            per_read_acc.append(acc_read)
             pred_lengths.append(len(pred_seq))
             ref_lengths.append(len(ref_seq))
             update_error_patterns(
@@ -372,7 +386,7 @@ def main() -> None:
                 qstr = q_char * len(pred_seq)
                 fastq_handle.write(f"@read_{read_idx}\n{pred_seq}\n+\n{qstr}\n")
 
-    pbma_avg = float(np.mean(pbma_scores)) if pbma_scores else 0.0
+    acc_avg = float(np.mean(acc_scores)) if acc_scores else 0.0
     ratios = counts_to_ratio(total_counts)
 
     out_dir = args.out_dir
@@ -380,9 +394,9 @@ def main() -> None:
     length_bins = init_length_bins()
     position_bins = init_position_bins()
     summary = {
-        "pbma": pbma_avg,
-        "read_level_pbma": float(np.mean(per_read_pbma)) if per_read_pbma else 0.0,
-        "read_exact_match_rate": exact_match / max(len(per_read_pbma), 1),
+        "accuracy": acc_avg,
+        "read_level_accuracy": float(np.mean(per_read_acc)) if per_read_acc else 0.0,
+        "read_exact_match_rate": exact_match / max(len(per_read_acc), 1),
         "counts": total_counts,
         "ratios": ratios,
         "mismatch_matrix": mismatch_matrix,

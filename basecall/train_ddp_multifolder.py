@@ -15,7 +15,7 @@ train_ddp_multifolder.py
 - CTC 使用 batch["input_lengths"]（来自 tokenizer attention_mask）
 - ✅ 新增 checkpoint 保存/恢复：
   - 每 epoch 保存 ckpt_last.pt
-  - val_pbma 最优保存 ckpt_best.pt
+  - val_acc 最优保存 ckpt_best.pt
   - 支持 --resume_ckpt 恢复 model/optimizer/scheduler/epoch/best 指标
 """
 
@@ -35,7 +35,14 @@ from tqdm.auto import tqdm
 
 from .utils import seed_everything, BLANK_IDX, resolve_input_lengths
 from .model import BasecallModel
-from .metrics import ctc_greedy_decode, ctc_decode, batch_pbma, plot_curves, save_metrics_csv, ctc_crf_loss
+from .metrics import (
+    ctc_greedy_decode,
+    ctc_decode,
+    batch_bonito_accuracy,
+    plot_curves,
+    save_metrics_csv,
+    ctc_crf_loss,
+)
 from .data_multifolder import (
     scan_jsonl_files,
     split_jsonl_files_by_group,
@@ -310,10 +317,11 @@ def train_one_epoch(model, ctc_loss, data_loader, optimizer, scheduler,
 
 @torch.no_grad()
 def eval_one_epoch(model, ctc_loss, data_loader, device, rank: int, split_name: str, loss_type: str,
-                   ctc_crf_pad_blank: bool, ctc_crf_blank_score: float):
+                   ctc_crf_pad_blank: bool, ctc_crf_blank_score: float,
+                   acc_balanced: bool, acc_min_coverage: float):
     model.eval()
     total_loss, n_batches = 0.0, 0
-    total_pbma, n_pbma = 0.0, 0
+    total_acc, n_acc = 0.0, 0
 
     it = tqdm(data_loader, total=len(data_loader),
               disable=not is_main_process(rank), desc=f"[{split_name}]")
@@ -359,16 +367,21 @@ def eval_one_epoch(model, ctc_loss, data_loader, device, rank: int, split_name: 
             ctc_crf_pad_blank=ctc_crf_pad_blank,
             ctc_crf_blank_score=ctc_crf_blank_score,
         )
-        pbma = batch_pbma(pred_seqs, batch["target_seqs"])
-        total_pbma += float(pbma)
-        n_pbma += 1
+        acc = batch_bonito_accuracy(
+            pred_seqs,
+            batch["target_seqs"],
+            balanced=acc_balanced,
+            min_coverage=acc_min_coverage,
+        )
+        total_acc += float(acc)
+        n_acc += 1
 
     avg_loss = total_loss / max(n_batches, 1)
-    avg_pbma = total_pbma / max(n_pbma, 1)
+    avg_acc = total_acc / max(n_acc, 1)
 
     avg_loss = float(reduce_mean(torch.tensor(avg_loss, device=device)).item())
-    avg_pbma = float(reduce_mean(torch.tensor(avg_pbma, device=device)).item())
-    return avg_loss, avg_pbma
+    avg_acc = float(reduce_mean(torch.tensor(avg_acc, device=device)).item())
+    return avg_loss, avg_acc
 
 
 # -------------------- pretrained loader (keep) --------------------
@@ -467,7 +480,7 @@ def parse_args():
 
     # ✅ resume from a full checkpoint (model+optim+sched+epoch)
     p.add_argument("--resume_ckpt", type=str, default=None,
-                   help="Path to ckpt_last.pt to resume training (restores model/optimizer/scheduler/epoch/best_pbma).")
+                   help="Path to ckpt_last.pt to resume training (restores model/optimizer/scheduler/epoch/best_acc).")
 
     p.add_argument("--batch_size", type=int, default=128)
     p.add_argument("--num_epochs", type=int, default=50)
@@ -494,7 +507,7 @@ def parse_args():
     p.add_argument("--save_every", type=int, default=1,
                    help="Save ckpt_last.pt every N epochs (default 1).")
     p.add_argument("--save_best", action="store_true",
-                   help="Save ckpt_best.pt based on best val_pbma (default off unless provided).")
+                   help="Save ckpt_best.pt based on best val_acc (default off unless provided).")
     p.add_argument("--freeze_backbone", action="store_true",
                    help="Freeze backbone parameters; train only base_head.")
     p.add_argument("--unfreeze_last_n_layers", type=int, default=0,
@@ -524,6 +537,10 @@ def parse_args():
                    help="Optional auxiliary loss weight to penalize blank-dominated frames.")
     p.add_argument("--loss_type", choices=["ctc", "ctc-crf"], default="ctc",
                    help="Training loss type. Use ctc-crf only if a compatible ctc_crf library is installed.")
+    p.add_argument("--acc_balanced", action="store_true",
+                   help="Use Bonito balanced accuracy: (match - ins) / (match + mismatch + del).")
+    p.add_argument("--acc_min_coverage", type=float, default=0.0,
+                   help="Minimum reference coverage required to count a read for accuracy.")
     p.add_argument("--ctc_crf_state_len", type=int, default=5,
                    help="State length for Bonito CTC-CRF (used to set output classes).")
     p.add_argument("--ctc_crf_pad_blank", action="store_true",
@@ -754,10 +771,10 @@ def main():
             except Exception:
                 pass
         if is_main_process(rank):
-            logger.info(f"[Resume] start_epoch={start_epoch}, best_pbma={best_pbma}")
+            logger.info(f"[Resume] start_epoch={start_epoch}, best_acc={best_pbma}")
 
     # ---- loop ----
-    train_losses, val_losses, val_pbmas = [], [], []
+    train_losses, val_losses, val_accs = [], [], []
 
     # if resuming mid-run, you may want to pad arrays; we keep it simple:
     # curves will reflect only epochs run in this session.
@@ -785,11 +802,11 @@ def main():
         if is_main_process(rank):
             logger.info(f"[Train] epoch={epoch} avg_loss={tr_loss:.4f}")
 
-        val_loss, val_pbma = None, None
+        val_loss, val_acc = None, None
         if val_loader is not None:
             if val_sampler is not None:
                 val_sampler.set_epoch(epoch)
-            val_loss, val_pbma = eval_one_epoch(
+            val_loss, val_acc = eval_one_epoch(
                 model,
                 ctc_loss,
                 val_loader,
@@ -799,14 +816,16 @@ def main():
                 args.loss_type,
                 args.ctc_crf_pad_blank,
                 args.ctc_crf_blank_score,
+                args.acc_balanced,
+                args.acc_min_coverage,
             )
             val_losses.append(val_loss)
-            val_pbmas.append(val_pbma)
+            val_accs.append(val_acc)
 
             if is_main_process(rank):
-                logger.info(f"[Val] epoch={epoch} loss={val_loss:.4f} pbma={val_pbma:.4f}")
+                logger.info(f"[Val] epoch={epoch} loss={val_loss:.4f} acc={val_acc:.4f}")
                 if use_wandb and wandb is not None:
-                    wandb.log({"val/loss": float(val_loss), "val/pbma": float(val_pbma), "epoch": epoch})
+                    wandb.log({"val/loss": float(val_loss), "val/acc": float(val_acc), "epoch": epoch})
 
         # ---- checkpoint save ----
         if is_main_process(rank) and (epoch % max(args.save_every, 1) == 0):
@@ -818,13 +837,13 @@ def main():
                 scheduler=scheduler,
                 epoch=epoch,
                 best_pbma=best_pbma,
-                extra={"train_loss": tr_loss, "val_loss": val_loss, "val_pbma": val_pbma},
+                extra={"train_loss": tr_loss, "val_loss": val_loss, "val_acc": val_acc},
             )
             logger.info(f"[CKPT] saved {last_path}")
 
-        if is_main_process(rank) and args.save_best and (val_pbma is not None):
-            if float(val_pbma) > float(best_pbma):
-                best_pbma = float(val_pbma)
+        if is_main_process(rank) and args.save_best and (val_acc is not None):
+            if float(val_acc) > float(best_pbma):
+                best_pbma = float(val_acc)
                 best_path = os.path.join(args.output_dir, "ckpt_best.pt")
                 save_checkpoint(
                     best_path,
@@ -833,16 +852,16 @@ def main():
                     scheduler=scheduler,
                     epoch=epoch,
                     best_pbma=best_pbma,
-                    extra={"train_loss": tr_loss, "val_loss": val_loss, "val_pbma": val_pbma},
+                    extra={"train_loss": tr_loss, "val_loss": val_loss, "val_acc": val_acc},
                 )
-                logger.info(f"[CKPT] new best pbma={best_pbma:.4f} @ epoch={epoch}, saved {best_path}")
+                logger.info(f"[CKPT] new best acc={best_pbma:.4f} @ epoch={epoch}, saved {best_path}")
 
         if use_wandb and wandb is not None and is_main_process(rank):
             wandb.log({"epoch": epoch, "train/epoch_loss": float(tr_loss)})
 
     # ---- test ----
     if test_loader is not None:
-        test_loss, test_pbma = eval_one_epoch(
+        test_loss, test_acc = eval_one_epoch(
             model,
             ctc_loss,
             test_loader,
@@ -852,18 +871,20 @@ def main():
             args.loss_type,
             args.ctc_crf_pad_blank,
             args.ctc_crf_blank_score,
+            args.acc_balanced,
+            args.acc_min_coverage,
         )
         if is_main_process(rank):
-            logger.info(f"[Test] loss={test_loss:.4f} pbma={test_pbma:.4f}")
+            logger.info(f"[Test] loss={test_loss:.4f} acc={test_acc:.4f}")
             if use_wandb and wandb is not None:
-                wandb.log({"test/loss": float(test_loss), "test/pbma": float(test_pbma)})
+                wandb.log({"test/loss": float(test_loss), "test/acc": float(test_acc)})
 
     # ---- final save curves/csv ----
     if is_main_process(rank):
         try:
-            if val_losses and val_pbmas:
-                plot_curves(train_losses, val_losses, val_pbmas, save_path=os.path.join(args.output_dir, "curves.png"))
-                save_metrics_csv(train_losses, val_losses, val_pbmas, os.path.join(args.output_dir, "metrics.csv"))
+            if val_losses and val_accs:
+                plot_curves(train_losses, val_losses, val_accs, save_path=os.path.join(args.output_dir, "curves.png"))
+                save_metrics_csv(train_losses, val_losses, val_accs, os.path.join(args.output_dir, "metrics.csv"))
         except Exception as e:
             logger.warning(f"[Final Plot/CSV] failed: {e}")
 
@@ -873,10 +894,18 @@ def main():
         if loader is not None:
             batch = next(iter(loader))
             input_ids = batch["input_ids"].to(device)
+            attention_mask = batch.get("attention_mask")
+            if attention_mask is not None:
+                attention_mask = attention_mask.to(device)
             with torch.no_grad():
-                logits_btc = model(input_ids)
+                logits_btc = model(input_ids, attention_mask=attention_mask)
                 logits_tbc = logits_btc.transpose(0, 1)
-            pred_seqs = ctc_greedy_decode(logits_tbc, blank_idx=BLANK_IDX)
+            input_lengths = resolve_input_lengths(
+                input_ids,
+                attention_mask=attention_mask,
+                input_lengths=batch.get("input_lengths"),
+            )
+            pred_seqs = ctc_greedy_decode(logits_tbc, blank_idx=BLANK_IDX, input_lengths=input_lengths)
             ref_seqs = batch["target_seqs"]
             fig = plot_alignment_heatmap(pred_seqs, ref_seqs, max_reads=32, max_len=80)
             wandb.log({"final/base_alignment": wandb.Image(fig)})
