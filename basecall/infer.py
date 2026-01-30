@@ -12,13 +12,13 @@ import json
 import os
 import math
 import gzip
-from typing import List, Tuple, Dict, Any, Iterable
+from typing import List, Tuple, Iterable
 
 import torch
 from tqdm import tqdm
 
 from .model import BasecallModel
-from .utils import ID2BASE, BLANK_IDX, seed_everything
+from .utils import ID2BASE, BLANK_IDX, seed_everything, resolve_input_lengths, infer_head_config_from_state_dict
 from .metrics import ctc_decode
 
 # --------------------------
@@ -145,73 +145,6 @@ def iter_jsonl_reads(path: str) -> Iterable[Tuple[str, str]]:
             yield read_id, text
 
 
-def _infer_head_layers(state_dict: Dict[str, torch.Tensor], default_layers: int) -> int:
-    indices = set()
-    for key in state_dict.keys():
-        if key.startswith("base_head.blocks."):
-            parts = key.split(".")
-            if len(parts) > 2 and parts[2].isdigit():
-                indices.add(int(parts[2]))
-    if not indices:
-        return default_layers
-    return max(indices) + 1
-
-
-def _infer_kernel_size(state_dict: Dict[str, torch.Tensor], default_kernel: int) -> int:
-    weight = state_dict.get("base_head.blocks.0.0.weight")
-    if isinstance(weight, torch.Tensor) and weight.dim() == 3:
-        return int(weight.shape[-1])
-    return default_kernel
-
-
-def _infer_use_pointwise(state_dict: Dict[str, torch.Tensor], default_value: bool) -> bool:
-    if "base_head.blocks.0.1.weight" in state_dict:
-        return True
-    if any(key.startswith("base_head.blocks.") and ".1.weight" in key for key in state_dict):
-        return True
-    return default_value
-
-
-def _infer_num_classes(state_dict: Dict[str, torch.Tensor], default_value: int) -> int:
-    weight = state_dict.get("base_head.proj.weight")
-    if isinstance(weight, torch.Tensor) and weight.dim() == 2:
-        return int(weight.shape[0])
-    return default_value
-
-
-def _infer_transformer_layers(state_dict: Dict[str, torch.Tensor]) -> int:
-    indices = set()
-    for key in state_dict.keys():
-        if key.startswith("base_head.transformer.layers."):
-            parts = key.split(".")
-            if len(parts) > 3 and parts[3].isdigit():
-                indices.add(int(parts[3]))
-    if not indices:
-        return 0
-    return max(indices) + 1
-
-
-def _resolve_head_config(state_dict: Dict[str, torch.Tensor]) -> Dict[str, object]:
-    head_layers = _infer_head_layers(state_dict, default_layers=2)
-    head_kernel_size = _infer_kernel_size(state_dict, default_kernel=5)
-    head_use_pointwise = _infer_use_pointwise(state_dict, default_value=True)
-    num_classes = _infer_num_classes(state_dict, default_value=len(ID2BASE))
-
-    inferred_transformer_layers = _infer_transformer_layers(state_dict)
-    head_transformer_layers = inferred_transformer_layers
-    head_use_transformer = inferred_transformer_layers > 0
-    head_transformer_heads = 4
-    return {
-        "head_layers": int(head_layers),
-        "head_kernel_size": int(head_kernel_size),
-        "head_use_pointwise": bool(head_use_pointwise),
-        "head_use_transformer": bool(head_use_transformer),
-        "head_transformer_layers": int(head_transformer_layers),
-        "head_transformer_heads": int(head_transformer_heads),
-        "num_classes": int(num_classes),
-    }
-
-
 def split_bwav_tokens(text: str) -> List[str]:
     tokens = []
     i = 0
@@ -313,7 +246,7 @@ def main():
             sd = state
     else:
         sd = state
-    head_config = _resolve_head_config(sd)
+    head_config = infer_head_config_from_state_dict(sd)
     # load model
     model = BasecallModel(
         model_path=args.model_name_or_path,
@@ -353,14 +286,10 @@ def main():
                 attention_mask = enc.get("attention_mask")
                 if attention_mask is not None:
                     attention_mask = attention_mask.to(device)
-                    input_lengths = attention_mask.sum(dim=1).to(torch.long)
-                else:
-                    input_lengths = torch.full(
-                        (input_ids.size(0),),
-                        input_ids.size(1),
-                        dtype=torch.long,
-                        device=input_ids.device,
-                    )
+                input_lengths = resolve_input_lengths(
+                    input_ids,
+                    attention_mask=attention_mask,
+                )
 
                 with torch.cuda.amp.autocast(enabled=use_amp):
                     logits_btc = model(input_ids, attention_mask=attention_mask)  # [B,T,C]

@@ -21,7 +21,6 @@ train_ddp_multifolder.py
 
 import os
 import argparse
-import difflib
 import matplotlib.pyplot as plt
 import logging
 from typing import Tuple, Optional, Any, Dict
@@ -34,7 +33,7 @@ from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from tqdm.auto import tqdm
 
-from .utils import seed_everything, BLANK_IDX
+from .utils import seed_everything, BLANK_IDX, resolve_input_lengths
 from .model import BasecallModel
 from .metrics import ctc_greedy_decode, ctc_decode, batch_pbma, plot_curves, save_metrics_csv, ctc_crf_loss
 from .data_multifolder import (
@@ -253,10 +252,11 @@ def train_one_epoch(model, ctc_loss, data_loader, optimizer, scheduler,
               disable=not is_main_process(rank), desc="[train]")
     for step, batch in it:
         input_ids = batch["input_ids"].to(device)
-        input_lengths = batch.get("input_lengths", None)
-        if input_lengths is None:
-            input_lengths = torch.full((input_ids.size(0),), input_ids.size(1), dtype=torch.long)
-        input_lengths = input_lengths.to(device)
+        input_lengths = resolve_input_lengths(
+            input_ids,
+            attention_mask=batch.get("attention_mask"),
+            input_lengths=batch.get("input_lengths"),
+        )
 
         target_labels = batch["target_labels"].to(device)
         target_lengths = batch["target_lengths"].to(device)
@@ -319,10 +319,11 @@ def eval_one_epoch(model, ctc_loss, data_loader, device, rank: int, split_name: 
               disable=not is_main_process(rank), desc=f"[{split_name}]")
     for batch in it:
         input_ids = batch["input_ids"].to(device)
-        input_lengths = batch.get("input_lengths", None)
-        if input_lengths is None:
-            input_lengths = torch.full((input_ids.size(0),), input_ids.size(1), dtype=torch.long)
-        input_lengths = input_lengths.to(device)
+        input_lengths = resolve_input_lengths(
+            input_ids,
+            attention_mask=batch.get("attention_mask"),
+            input_lengths=batch.get("input_lengths"),
+        )
 
         target_labels = batch["target_labels"].to(device)
         target_lengths = batch["target_lengths"].to(device)

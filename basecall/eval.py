@@ -39,7 +39,7 @@ from .data_multifolder import (
 )
 from .metrics import ctc_decode, batch_pbma, cal_per_base_match_accuracy
 from .model import BasecallModel
-from .utils import BLANK_IDX, ID2BASE, seed_everything
+from .utils import BLANK_IDX, ID2BASE, seed_everything, infer_head_config_from_state_dict, resolve_input_lengths
 from .callback import plot_alignment_heatmap, plot_aligned_heatmap_png, align_sequences_indel_aware
 
 
@@ -194,73 +194,6 @@ def _parse_path_list(value: str | None) -> List[str]:
     return [x.strip() for x in value.split(",") if x.strip()]
 
 
-def _infer_head_layers(state_dict: Dict[str, torch.Tensor], default_layers: int) -> int:
-    indices = set()
-    for key in state_dict.keys():
-        if key.startswith("base_head.blocks."):
-            parts = key.split(".")
-            if len(parts) > 2 and parts[2].isdigit():
-                indices.add(int(parts[2]))
-    if not indices:
-        return default_layers
-    return max(indices) + 1
-
-
-def _infer_kernel_size(state_dict: Dict[str, torch.Tensor], default_kernel: int) -> int:
-    weight = state_dict.get("base_head.blocks.0.0.weight")
-    if isinstance(weight, torch.Tensor) and weight.dim() == 3:
-        return int(weight.shape[-1])
-    return default_kernel
-
-
-def _infer_use_pointwise(state_dict: Dict[str, torch.Tensor], default_value: bool) -> bool:
-    if "base_head.blocks.0.1.weight" in state_dict:
-        return True
-    if any(key.startswith("base_head.blocks.") and ".1.weight" in key for key in state_dict):
-        return True
-    return default_value
-
-
-def _infer_num_classes(state_dict: Dict[str, torch.Tensor], default_value: int) -> int:
-    weight = state_dict.get("base_head.proj.weight")
-    if isinstance(weight, torch.Tensor) and weight.dim() == 2:
-        return int(weight.shape[0])
-    return default_value
-
-
-def _infer_transformer_layers(state_dict: Dict[str, torch.Tensor]) -> int:
-    indices = set()
-    for key in state_dict.keys():
-        if key.startswith("base_head.transformer.layers."):
-            parts = key.split(".")
-            if len(parts) > 3 and parts[3].isdigit():
-                indices.add(int(parts[3]))
-    if not indices:
-        return 0
-    return max(indices) + 1
-
-
-def _resolve_head_config(state_dict: Dict[str, torch.Tensor]) -> Dict[str, object]:
-    head_layers = _infer_head_layers(state_dict, default_layers=2)
-    head_kernel_size = _infer_kernel_size(state_dict, default_kernel=5)
-    head_use_pointwise = _infer_use_pointwise(state_dict, default_value=True)
-    num_classes = _infer_num_classes(state_dict, default_value=len(ID2BASE))
-
-    inferred_transformer_layers = _infer_transformer_layers(state_dict)
-    head_transformer_layers = inferred_transformer_layers
-    head_use_transformer = inferred_transformer_layers > 0
-    head_transformer_heads = 4
-    return {
-        "head_layers": int(head_layers),
-        "head_kernel_size": int(head_kernel_size),
-        "head_use_pointwise": bool(head_use_pointwise),
-        "head_use_transformer": bool(head_use_transformer),
-        "head_transformer_layers": int(head_transformer_layers),
-        "head_transformer_heads": int(head_transformer_heads),
-        "num_classes": int(num_classes),
-    }
-
-
 @torch.no_grad()
 def main() -> None:
     ap = argparse.ArgumentParser()
@@ -329,7 +262,7 @@ def main() -> None:
         dataset = MultiJsonlSignalRefDataset(jsonl_files)
 
     state_dict = load_checkpoint_state(args.ckpt)
-    head_config = _resolve_head_config(state_dict)
+    head_config = infer_head_config_from_state_dict(state_dict)
     model = BasecallModel(
         model_path=args.model_name_or_path,
         num_classes=head_config["num_classes"],
@@ -383,12 +316,17 @@ def main() -> None:
             logits_btc = model(input_ids, attention_mask=attention_mask)
 
         logits_tbc = logits_btc.transpose(0, 1)
+        input_lengths = resolve_input_lengths(
+            input_ids,
+            attention_mask=attention_mask,
+            input_lengths=batch.get("input_lengths"),
+        )
         pred_ids = ctc_decode(
             logits_tbc,
             decoder=args.decoder,
             beam_width=args.beam_width,
             blank_idx=BLANK_IDX,
-            input_lengths=batch.get("input_lengths"),
+            input_lengths=input_lengths,
             ctc_crf_pad_blank=args.ctc_crf_pad_blank,
             ctc_crf_blank_score=args.ctc_crf_blank_score,
             koi_beam_cut=args.koi_beam_cut,
