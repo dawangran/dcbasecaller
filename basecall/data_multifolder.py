@@ -33,7 +33,7 @@ import torch
 from torch.utils.data import Dataset
 from transformers import PreTrainedTokenizerBase
 
-from .utils import BASE2ID
+from .utils import BASE2ID, resolve_input_lengths
 
 # -------------------------
 # jsonl.gz discovery + split
@@ -403,11 +403,10 @@ def create_collate_fn(tokenizer: PreTrainedTokenizerBase):
         attention_mask = enc.get("attention_mask", None)
 
         # 新增：真实长度（CTC 推荐用这个）
-        if attention_mask is not None:
-            input_lengths = attention_mask.sum(dim=1).to(torch.long)
-        else:
-            # fallback
-            input_lengths = torch.full((input_ids.size(0),), input_ids.size(1), dtype=torch.long)
+        input_lengths = resolve_input_lengths(
+            input_ids,
+            attention_mask=attention_mask,
+        )
 
         target_lengths = torch.tensor([len(x) for x in target_seqs], dtype=torch.long)
         target_labels = torch.cat([torch.tensor(x, dtype=torch.long) for x in target_seqs]) if target_seqs else torch.empty(0, dtype=torch.long)

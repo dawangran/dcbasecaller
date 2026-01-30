@@ -14,6 +14,7 @@ from .metrics import (
     ctc_beam_search_decode,
     koi_beam_search_decode,
     batch_pbma,
+    batch_bonito_accuracy,
     inspect_batch,
     plot_curves,
 )
