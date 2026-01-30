@@ -294,7 +294,11 @@ def _pad_ctc_crf_blank(logits_tbc: torch.Tensor, blank_score: float) -> torch.Te
     no_blank_dim = (n_base ** state_len) * n_base
     full_dim = (n_base + 1) * (n_base ** state_len)
     if logits_tbc.size(-1) == full_dim:
-        return logits_tbc
+        t_len, batch, _ = logits_tbc.shape
+        reshaped = logits_tbc.view(t_len, batch, n_base ** state_len, n_base + 1)
+        reshaped = reshaped.clone()
+        reshaped[..., 0] = float(blank_score)
+        return reshaped.view(t_len, batch, -1)
     if logits_tbc.size(-1) != no_blank_dim:
         raise ValueError(
             f"CTC-CRF logits dim mismatch: got {logits_tbc.size(-1)}, "

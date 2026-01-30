@@ -574,11 +574,8 @@ def main():
         from . import ctc_crf as crf_backend
 
         _os.environ["CTC_CRF_STATE_LEN"] = str(args.ctc_crf_state_len)
-        if args.ctc_crf_pad_blank:
-            num_classes = crf_backend.crf_num_classes_no_blank(args.ctc_crf_state_len)
-            head_blank_idx = -1
-        else:
-            num_classes = crf_backend.crf_num_classes(args.ctc_crf_state_len)
+        num_classes = crf_backend.crf_num_classes(args.ctc_crf_state_len)
+        head_blank_idx = None
 
     if args.head_linear:
         args.head_layers = 0
