@@ -221,19 +221,17 @@ def main():
                     help="Optional scalar applied to head output logits (after activation).")
     ap.add_argument("--ctc_crf_state_len", type=int, default=5,
                     help="State length for Bonito CTC-CRF (used for CRF decoder).")
-    ap.add_argument("--ctc_crf_pad_blank", action="store_true",
-                    help="Pad a fixed blank score onto CTC-CRF logits before decoding.")
-    ap.add_argument("--ctc_crf_blank_score", type=float, default=0.0,
-                    help="Blank score used when padding CTC-CRF logits.")
+    ap.add_argument("--ctc_crf_blank_score", type=float, default=None,
+                    help="If set, overwrite CTC-CRF blank scores with this fixed value (disables blank training).")
     args = ap.parse_args()
 
     seed_everything(42)
     device = torch.device(args.device)
     use_amp = args.amp and device.type == "cuda"
-    if args.ctc_crf_pad_blank and args.decoder != "crf":
+    if args.ctc_crf_blank_score is not None and args.decoder != "crf":
         raise ValueError(
-            "ctc_crf_pad_blank=True produces no-blank logits; use --decoder crf "
-            "or disable --ctc_crf_pad_blank for CTC/Koi decoders."
+            "ctc_crf_blank_score set: use --decoder crf or unset the fixed blank score "
+            "for CTC/Koi decoders."
         )
     if args.decoder == "crf":
         os.environ["CTC_CRF_STATE_LEN"] = str(args.ctc_crf_state_len)
@@ -316,8 +314,8 @@ def main():
                         beam_width=args.beam_width,
                         blank_idx=BLANK_IDX,
                         input_lengths=input_lengths,
-                        ctc_crf_pad_blank=args.ctc_crf_pad_blank,
-                        ctc_crf_blank_score=args.ctc_crf_blank_score,
+                        ctc_crf_pad_blank=args.ctc_crf_blank_score is not None,
+                        ctc_crf_blank_score=float(args.ctc_crf_blank_score or 0.0),
                         koi_beam_cut=args.koi_beam_cut,
                         koi_scale=args.koi_scale,
                         koi_offset=args.koi_offset,

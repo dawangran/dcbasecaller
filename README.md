@@ -130,8 +130,7 @@ basecall-train \
 - `--aux_blank_weight`: optional penalty to discourage blank-dominated outputs.
 - `--loss_type`: `ctc` (default) or `ctc-crf` (requires k2 or ont-koi + `ctc_crf.py` adapter).
 - `--ctc_crf_state_len`: Bonito CTC-CRF state length (controls CRF head output classes).
-- `--ctc_crf_pad_blank`: pad a fixed blank score onto CTC-CRF logits (use when the head omits blank scores).
-- `--ctc_crf_blank_score`: blank score used by `--ctc_crf_pad_blank` (default: 0.0).
+- `--ctc_crf_blank_score`: if set, overwrite blank scores with this fixed value (disables blank training).
 - `--acc_balanced`: use Bonito balanced accuracy for validation/checkpointing.
 - `--acc_min_coverage`: minimum reference coverage required to count a read for accuracy.
 
@@ -237,8 +236,8 @@ basecall-infer \
 ### Notes for Bonito-style CTC-CRF training/inference
 
 - Use `--loss_type ctc-crf` with `--ctc_crf_state_len` during training to match the CTC-CRF head size.
-- If you trained with `--ctc_crf_pad_blank`, keep it on for evaluation/inference so the blank score is padded consistently.
-- When `--ctc_crf_pad_blank` is enabled, you must use `--decoder crf` (CTC/Koi decoders expect full logits).
+- If you set `--ctc_crf_blank_score`, keep it on for evaluation/inference so the blank score is fixed consistently.
+- When `--ctc_crf_blank_score` is set, you must use `--decoder crf` (CTC/Koi decoders expect full logits).
 - For Bonito-style logit scaling, use `--head_output_activation tanh` and `--head_output_scale 5` so scores match the expected range.
 
 ### All inference arguments

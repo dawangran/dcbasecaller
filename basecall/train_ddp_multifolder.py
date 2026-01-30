@@ -251,7 +251,7 @@ def load_checkpoint(path: str,
 def train_one_epoch(model, ctc_loss, data_loader, optimizer, scheduler,
                     device, rank: int, log_interval: int, use_wandb: bool,
                     aux_blank_weight: float, loss_type: str,
-                    ctc_crf_pad_blank: bool, ctc_crf_blank_score: float):
+                    ctc_crf_blank_score: float | None):
     model.train()
     total_loss, n_batches = 0.0, 0
 
@@ -286,8 +286,8 @@ def train_one_epoch(model, ctc_loss, data_loader, optimizer, scheduler,
                 input_lengths,
                 target_lengths,
                 blank_idx=BLANK_IDX,
-                pad_blank=ctc_crf_pad_blank,
-                blank_score=ctc_crf_blank_score,
+                pad_blank=ctc_crf_blank_score is not None,
+                blank_score=float(ctc_crf_blank_score or 0.0),
             )
         else:
             loss = ctc_loss(logits_tbc.log_softmax(2), target_labels, input_lengths, target_lengths)
@@ -317,7 +317,7 @@ def train_one_epoch(model, ctc_loss, data_loader, optimizer, scheduler,
 
 @torch.no_grad()
 def eval_one_epoch(model, ctc_loss, data_loader, device, rank: int, split_name: str, loss_type: str,
-                   ctc_crf_pad_blank: bool, ctc_crf_blank_score: float,
+                   ctc_crf_blank_score: float | None,
                    acc_balanced: bool, acc_min_coverage: float):
     model.eval()
     total_loss, n_batches = 0.0, 0
@@ -351,8 +351,8 @@ def eval_one_epoch(model, ctc_loss, data_loader, device, rank: int, split_name: 
                 input_lengths,
                 target_lengths,
                 blank_idx=BLANK_IDX,
-                pad_blank=ctc_crf_pad_blank,
-                blank_score=ctc_crf_blank_score,
+                pad_blank=ctc_crf_blank_score is not None,
+                blank_score=float(ctc_crf_blank_score or 0.0),
             )
         else:
             loss = ctc_loss(logits_tbc.log_softmax(2), target_labels, input_lengths, target_lengths)
@@ -364,8 +364,8 @@ def eval_one_epoch(model, ctc_loss, data_loader, device, rank: int, split_name: 
             decoder="crf" if loss_type == "ctc-crf" else "greedy",
             blank_idx=BLANK_IDX,
             input_lengths=input_lengths,
-            ctc_crf_pad_blank=ctc_crf_pad_blank,
-            ctc_crf_blank_score=ctc_crf_blank_score,
+            ctc_crf_pad_blank=ctc_crf_blank_score is not None,
+            ctc_crf_blank_score=float(ctc_crf_blank_score or 0.0),
         )
         acc = batch_bonito_accuracy(
             pred_seqs,
@@ -543,10 +543,8 @@ def parse_args():
                    help="Minimum reference coverage required to count a read for accuracy.")
     p.add_argument("--ctc_crf_state_len", type=int, default=5,
                    help="State length for Bonito CTC-CRF (used to set output classes).")
-    p.add_argument("--ctc_crf_pad_blank", action="store_true",
-                   help="Pad a fixed blank score onto CTC-CRF logits before loss/decode (expects head without blank).")
-    p.add_argument("--ctc_crf_blank_score", type=float, default=0.0,
-                   help="Blank score used when padding CTC-CRF logits (see --ctc_crf_pad_blank).")
+    p.add_argument("--ctc_crf_blank_score", type=float, default=None,
+                   help="If set, overwrite CTC-CRF blank scores with this fixed value (disables blank training).")
 
 
     return p.parse_args()
@@ -791,7 +789,6 @@ def main():
             use_wandb,
             args.aux_blank_weight,
             args.loss_type,
-            args.ctc_crf_pad_blank,
             args.ctc_crf_blank_score,
         )
         train_losses.append(tr_loss)
@@ -811,7 +808,6 @@ def main():
                 rank,
                 "val",
                 args.loss_type,
-                args.ctc_crf_pad_blank,
                 args.ctc_crf_blank_score,
                 args.acc_balanced,
                 args.acc_min_coverage,
@@ -866,7 +862,6 @@ def main():
             rank,
             "test",
             args.loss_type,
-            args.ctc_crf_pad_blank,
             args.ctc_crf_blank_score,
             args.acc_balanced,
             args.acc_min_coverage,
