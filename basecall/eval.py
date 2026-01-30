@@ -62,7 +62,7 @@ def error_counts(pred_seq: str, ref_seq: str) -> Dict[str, int]:
     ops = _parse_cigar(cigar) if cigar else []
     counts = {"match": 0, "mismatch": 0, "ins": 0, "del": 0}
     for op in ops:
-        if op == "=":
+        if op in {"=", "M"}:
             counts["match"] += 1
         elif op == "X":
             counts["mismatch"] += 1
