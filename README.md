@@ -132,9 +132,11 @@ basecall-train \
 - `--ctc_crf_state_len`: Bonito CTC-CRF state length (controls CRF head output classes).
 - `--ctc_crf_pad_blank`: pad a fixed blank score onto CTC-CRF logits (use when the head omits blank scores).
 - `--ctc_crf_blank_score`: blank score used by `--ctc_crf_pad_blank` (default: 0.0).
+- `--acc_balanced`: use Bonito balanced accuracy for validation/checkpointing.
+- `--acc_min_coverage`: minimum reference coverage required to count a read for accuracy.
 
 **Checkpointing & loading**
-- `--resume_ckpt`: resume from `ckpt_last.pt` (model/optim/sched/epoch/best_pbma).
+- `--resume_ckpt`: resume from `ckpt_last.pt` (model/optim/sched/epoch/best_acc).
 - `--pretrained_ckpt`: load pretrained weights into the model.
 - `--pretrained_strict`, `--pretrained_key`.
 - `--save_every`, `--save_best`.
@@ -187,6 +189,8 @@ basecall-eval \
 - `--decoder`: `greedy`, `beam`, `beam_search`, or `crf` (crf requires ont-koi + `ctc_crf.py` adapter).
 - `--beam_width`: beam width for `beam` decoder.
 - `--koi_beam_cut`, `--koi_scale`, `--koi_offset`, `--koi_blank_score`, `--koi_reverse`: parameters for the Koi `beam_search` decoder.
+- `--acc_balanced`: use Bonito balanced accuracy in metrics.
+- `--acc_min_coverage`: minimum reference coverage required to count a read for accuracy.
 - `--batch_size`, `--num_workers`: eval dataloader controls.
 - `--out_dir`: output directory for metrics/plots.
 - `--num_visualize`: number of reads to visualize (default: 100).
@@ -198,7 +202,7 @@ basecall-eval \
 
 ### Outputs
 
-- `eval_out/metrics.json`: PBMA, read-level PBMA, exact-match rate, error ratios, base-level error patterns (mismatch matrix + insertion/deletion base counts), length histograms (pred/ref), and deletion position distribution.
+- `eval_out/metrics.json`: Bonito-style accuracy, read-level accuracy, exact-match rate, error ratios, base-level error patterns (mismatch matrix + insertion/deletion base counts), length histograms (pred/ref), and deletion position distribution.
 
 ---
 
@@ -234,6 +238,7 @@ basecall-infer \
 
 - Use `--loss_type ctc-crf` with `--ctc_crf_state_len` during training to match the CTC-CRF head size.
 - If you trained with `--ctc_crf_pad_blank`, keep it on for evaluation/inference so the blank score is padded consistently.
+- When `--ctc_crf_pad_blank` is enabled, you must use `--decoder crf` (CTC/Koi decoders expect full logits).
 - For Bonito-style logit scaling, use `--head_output_activation tanh` and `--head_output_scale 5` so scores match the expected range.
 
 ### All inference arguments
