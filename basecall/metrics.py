@@ -325,31 +325,40 @@ def _parse_cigar(cigar: str) -> List[str]:
     return ops
 
 
-def cal_per_base_match_accuracy(pred_seq: str, ref_seq: str) -> float:
-    """PBMA = match / (match + mismatch + ins + del)"""
-    if not pred_seq or not ref_seq:
-        return 0.0
+def _pbma_counts(pred_seq: str, ref_seq: str) -> Tuple[int, int]:
+    """
+    返回 (match, ref_len)，其中 ref_len = match + mismatch + del.
+    以参考序列为基准计算 PBMA，忽略插入项对分母的影响。
+    """
+    if not ref_seq:
+        return 0, 0
+    if not pred_seq:
+        return 0, len(ref_seq)
 
     result = edlib.align(pred_seq, ref_seq, task="path")
     cigar = result.get("cigar", None)
     if cigar is None:
-        return 0.0
+        return 0, len(ref_seq)
 
     ops = _parse_cigar(cigar)
-    match = mismatch = ins = dele = 0
+    match = mismatch = dele = 0
 
     for op in ops:
-        if op == "=":
+        if op in {"=", "M"}:
             match += 1
         elif op == "X":
             mismatch += 1
-        elif op == "I":
-            ins += 1
         elif op == "D":
             dele += 1
 
-    total = match + mismatch + ins + dele
-    return match / total if total > 0 else 0.0
+    ref_len = match + mismatch + dele
+    return match, ref_len
+
+
+def cal_per_base_match_accuracy(pred_seq: str, ref_seq: str) -> float:
+    """PBMA = match / ref_len (ref_len = match + mismatch + del)"""
+    match, ref_len = _pbma_counts(pred_seq, ref_seq)
+    return match / ref_len if ref_len > 0 else 0.0
 
 
 def batch_pbma(
@@ -357,16 +366,19 @@ def batch_pbma(
     ref_seqs: List[List[int]],
 ) -> float:
     """
-    计算一个 batch 的平均 PBMA
+    计算一个 batch 的 PBMA（按参考长度加权）
     pred_seqs/ref_seqs: list[list[int]]，标签 1..4
     """
     assert len(pred_seqs) == len(ref_seqs)
-    scores = []
+    total_match = 0
+    total_ref = 0
     for p_ids, r_ids in zip(pred_seqs, ref_seqs):
         p_str = "".join(ID2BASE.get(i, "N") for i in p_ids)
         r_str = "".join(ID2BASE.get(i, "N") for i in r_ids)
-        scores.append(cal_per_base_match_accuracy(p_str, r_str))
-    return float(np.mean(scores)) if scores else 0.0
+        match, ref_len = _pbma_counts(p_str, r_str)
+        total_match += match
+        total_ref += ref_len
+    return float(total_match) / float(total_ref) if total_ref > 0 else 0.0
 
 
 # ---------------- Inspect batch ----------------
