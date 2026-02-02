@@ -12,13 +12,13 @@ import json
 import os
 import math
 import gzip
-from typing import List, Tuple, Dict, Any, Iterable
+from typing import List, Tuple, Iterable
 
 import torch
 from tqdm import tqdm
 
 from .model import BasecallModel
-from .utils import ID2BASE, BLANK_IDX, seed_everything
+from .utils import ID2BASE, BLANK_IDX, seed_everything, resolve_input_lengths, infer_head_config_from_state_dict
 from .metrics import ctc_decode
 
 # --------------------------
@@ -145,73 +145,6 @@ def iter_jsonl_reads(path: str) -> Iterable[Tuple[str, str]]:
             yield read_id, text
 
 
-def _infer_head_layers(state_dict: Dict[str, torch.Tensor], default_layers: int) -> int:
-    indices = set()
-    for key in state_dict.keys():
-        if key.startswith("base_head.blocks."):
-            parts = key.split(".")
-            if len(parts) > 2 and parts[2].isdigit():
-                indices.add(int(parts[2]))
-    if not indices:
-        return default_layers
-    return max(indices) + 1
-
-
-def _infer_kernel_size(state_dict: Dict[str, torch.Tensor], default_kernel: int) -> int:
-    weight = state_dict.get("base_head.blocks.0.0.weight")
-    if isinstance(weight, torch.Tensor) and weight.dim() == 3:
-        return int(weight.shape[-1])
-    return default_kernel
-
-
-def _infer_use_pointwise(state_dict: Dict[str, torch.Tensor], default_value: bool) -> bool:
-    if "base_head.blocks.0.1.weight" in state_dict:
-        return True
-    if any(key.startswith("base_head.blocks.") and ".1.weight" in key for key in state_dict):
-        return True
-    return default_value
-
-
-def _infer_num_classes(state_dict: Dict[str, torch.Tensor], default_value: int) -> int:
-    weight = state_dict.get("base_head.proj.weight")
-    if isinstance(weight, torch.Tensor) and weight.dim() == 2:
-        return int(weight.shape[0])
-    return default_value
-
-
-def _infer_transformer_layers(state_dict: Dict[str, torch.Tensor]) -> int:
-    indices = set()
-    for key in state_dict.keys():
-        if key.startswith("base_head.transformer.layers."):
-            parts = key.split(".")
-            if len(parts) > 3 and parts[3].isdigit():
-                indices.add(int(parts[3]))
-    if not indices:
-        return 0
-    return max(indices) + 1
-
-
-def _resolve_head_config(state_dict: Dict[str, torch.Tensor]) -> Dict[str, object]:
-    head_layers = _infer_head_layers(state_dict, default_layers=2)
-    head_kernel_size = _infer_kernel_size(state_dict, default_kernel=5)
-    head_use_pointwise = _infer_use_pointwise(state_dict, default_value=True)
-    num_classes = _infer_num_classes(state_dict, default_value=len(ID2BASE))
-
-    inferred_transformer_layers = _infer_transformer_layers(state_dict)
-    head_transformer_layers = inferred_transformer_layers
-    head_use_transformer = inferred_transformer_layers > 0
-    head_transformer_heads = 4
-    return {
-        "head_layers": int(head_layers),
-        "head_kernel_size": int(head_kernel_size),
-        "head_use_pointwise": bool(head_use_pointwise),
-        "head_use_transformer": bool(head_use_transformer),
-        "head_transformer_layers": int(head_transformer_layers),
-        "head_transformer_heads": int(head_transformer_heads),
-        "num_classes": int(num_classes),
-    }
-
-
 def split_bwav_tokens(text: str) -> List[str]:
     tokens = []
     i = 0
@@ -288,15 +221,18 @@ def main():
                     help="Optional scalar applied to head output logits (after activation).")
     ap.add_argument("--ctc_crf_state_len", type=int, default=5,
                     help="State length for Bonito CTC-CRF (used for CRF decoder).")
-    ap.add_argument("--ctc_crf_pad_blank", action="store_true",
-                    help="Pad a fixed blank score onto CTC-CRF logits before decoding.")
-    ap.add_argument("--ctc_crf_blank_score", type=float, default=0.0,
-                    help="Blank score used when padding CTC-CRF logits.")
+    ap.add_argument("--ctc_crf_blank_score", type=float, default=None,
+                    help="If set, overwrite CTC-CRF blank scores with this fixed value (disables blank training).")
     args = ap.parse_args()
 
     seed_everything(42)
     device = torch.device(args.device)
     use_amp = args.amp and device.type == "cuda"
+    if args.ctc_crf_blank_score is not None and args.decoder != "crf":
+        raise ValueError(
+            "ctc_crf_blank_score set: use --decoder crf or unset the fixed blank score "
+            "for CTC/Koi decoders."
+        )
     if args.decoder == "crf":
         os.environ["CTC_CRF_STATE_LEN"] = str(args.ctc_crf_state_len)
 
@@ -313,7 +249,7 @@ def main():
             sd = state
     else:
         sd = state
-    head_config = _resolve_head_config(sd)
+    head_config = infer_head_config_from_state_dict(sd)
     # load model
     model = BasecallModel(
         model_path=args.model_name_or_path,
@@ -353,14 +289,10 @@ def main():
                 attention_mask = enc.get("attention_mask")
                 if attention_mask is not None:
                     attention_mask = attention_mask.to(device)
-                    input_lengths = attention_mask.sum(dim=1).to(torch.long)
-                else:
-                    input_lengths = torch.full(
-                        (input_ids.size(0),),
-                        input_ids.size(1),
-                        dtype=torch.long,
-                        device=input_ids.device,
-                    )
+                input_lengths = resolve_input_lengths(
+                    input_ids,
+                    attention_mask=attention_mask,
+                )
 
                 with torch.cuda.amp.autocast(enabled=use_amp):
                     logits_btc = model(input_ids, attention_mask=attention_mask)  # [B,T,C]
@@ -382,8 +314,8 @@ def main():
                         beam_width=args.beam_width,
                         blank_idx=BLANK_IDX,
                         input_lengths=input_lengths,
-                        ctc_crf_pad_blank=args.ctc_crf_pad_blank,
-                        ctc_crf_blank_score=args.ctc_crf_blank_score,
+                        ctc_crf_pad_blank=args.ctc_crf_blank_score is not None,
+                        ctc_crf_blank_score=float(args.ctc_crf_blank_score or 0.0),
                         koi_beam_cut=args.koi_beam_cut,
                         koi_scale=args.koi_scale,
                         koi_offset=args.koi_offset,

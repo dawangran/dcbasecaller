@@ -2,7 +2,7 @@
 """
 eval.py
 
-Evaluate jsonl.gz reads and report PBMA + error type proportions.
+Evaluate jsonl.gz reads and report accuracy + error type proportions.
 Also export alignment heatmaps for a few reads.
 
 Example:
@@ -37,9 +37,9 @@ from .data_multifolder import (
     MultiNpySignalRefDataset,
     create_collate_fn,
 )
-from .metrics import ctc_decode, batch_pbma, cal_per_base_match_accuracy
+from .metrics import ctc_decode, batch_bonito_accuracy, cal_bonito_accuracy
 from .model import BasecallModel
-from .utils import BLANK_IDX, ID2BASE, seed_everything
+from .utils import BLANK_IDX, ID2BASE, seed_everything, infer_head_config_from_state_dict, resolve_input_lengths
 from .callback import plot_alignment_heatmap, plot_aligned_heatmap_png, align_sequences_indel_aware
 
 
@@ -194,73 +194,6 @@ def _parse_path_list(value: str | None) -> List[str]:
     return [x.strip() for x in value.split(",") if x.strip()]
 
 
-def _infer_head_layers(state_dict: Dict[str, torch.Tensor], default_layers: int) -> int:
-    indices = set()
-    for key in state_dict.keys():
-        if key.startswith("base_head.blocks."):
-            parts = key.split(".")
-            if len(parts) > 2 and parts[2].isdigit():
-                indices.add(int(parts[2]))
-    if not indices:
-        return default_layers
-    return max(indices) + 1
-
-
-def _infer_kernel_size(state_dict: Dict[str, torch.Tensor], default_kernel: int) -> int:
-    weight = state_dict.get("base_head.blocks.0.0.weight")
-    if isinstance(weight, torch.Tensor) and weight.dim() == 3:
-        return int(weight.shape[-1])
-    return default_kernel
-
-
-def _infer_use_pointwise(state_dict: Dict[str, torch.Tensor], default_value: bool) -> bool:
-    if "base_head.blocks.0.1.weight" in state_dict:
-        return True
-    if any(key.startswith("base_head.blocks.") and ".1.weight" in key for key in state_dict):
-        return True
-    return default_value
-
-
-def _infer_num_classes(state_dict: Dict[str, torch.Tensor], default_value: int) -> int:
-    weight = state_dict.get("base_head.proj.weight")
-    if isinstance(weight, torch.Tensor) and weight.dim() == 2:
-        return int(weight.shape[0])
-    return default_value
-
-
-def _infer_transformer_layers(state_dict: Dict[str, torch.Tensor]) -> int:
-    indices = set()
-    for key in state_dict.keys():
-        if key.startswith("base_head.transformer.layers."):
-            parts = key.split(".")
-            if len(parts) > 3 and parts[3].isdigit():
-                indices.add(int(parts[3]))
-    if not indices:
-        return 0
-    return max(indices) + 1
-
-
-def _resolve_head_config(state_dict: Dict[str, torch.Tensor]) -> Dict[str, object]:
-    head_layers = _infer_head_layers(state_dict, default_layers=2)
-    head_kernel_size = _infer_kernel_size(state_dict, default_kernel=5)
-    head_use_pointwise = _infer_use_pointwise(state_dict, default_value=True)
-    num_classes = _infer_num_classes(state_dict, default_value=len(ID2BASE))
-
-    inferred_transformer_layers = _infer_transformer_layers(state_dict)
-    head_transformer_layers = inferred_transformer_layers
-    head_use_transformer = inferred_transformer_layers > 0
-    head_transformer_heads = 4
-    return {
-        "head_layers": int(head_layers),
-        "head_kernel_size": int(head_kernel_size),
-        "head_use_pointwise": bool(head_use_pointwise),
-        "head_use_transformer": bool(head_use_transformer),
-        "head_transformer_layers": int(head_transformer_layers),
-        "head_transformer_heads": int(head_transformer_heads),
-        "num_classes": int(num_classes),
-    }
-
-
 @torch.no_grad()
 def main() -> None:
     ap = argparse.ArgumentParser()
@@ -298,15 +231,22 @@ def main() -> None:
                     help="Optional scalar applied to head output logits (after activation).")
     ap.add_argument("--ctc_crf_state_len", type=int, default=5,
                     help="State length for Bonito CTC-CRF (used for CRF decoder).")
-    ap.add_argument("--ctc_crf_pad_blank", action="store_true",
-                    help="Pad a fixed blank score onto CTC-CRF logits before decoding.")
-    ap.add_argument("--ctc_crf_blank_score", type=float, default=0.0,
-                    help="Blank score used when padding CTC-CRF logits.")
+    ap.add_argument("--ctc_crf_blank_score", type=float, default=None,
+                    help="If set, overwrite CTC-CRF blank scores with this fixed value (disables blank training).")
+    ap.add_argument("--acc_balanced", action="store_true",
+                    help="Use Bonito balanced accuracy: (match - ins) / (match + mismatch + del).")
+    ap.add_argument("--acc_min_coverage", type=float, default=0.0,
+                    help="Minimum reference coverage required to count a read for accuracy.")
     args = ap.parse_args()
 
     seed_everything(42)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     use_amp = device.type == "cuda"
+    if args.ctc_crf_blank_score is not None and args.decoder != "crf":
+        raise ValueError(
+            "ctc_crf_blank_score set: use --decoder crf or unset the fixed blank score "
+            "for CTC/Koi decoders."
+        )
     if args.decoder == "crf":
         os.environ["CTC_CRF_STATE_LEN"] = str(args.ctc_crf_state_len)
 
@@ -329,7 +269,7 @@ def main() -> None:
         dataset = MultiJsonlSignalRefDataset(jsonl_files)
 
     state_dict = load_checkpoint_state(args.ckpt)
-    head_config = _resolve_head_config(state_dict)
+    head_config = infer_head_config_from_state_dict(state_dict)
     model = BasecallModel(
         model_path=args.model_name_or_path,
         num_classes=head_config["num_classes"],
@@ -356,8 +296,8 @@ def main() -> None:
     )
 
     total_counts = {"match": 0, "mismatch": 0, "ins": 0, "del": 0}
-    pbma_scores: List[float] = []
-    per_read_pbma: List[float] = []
+    acc_scores: List[float] = []
+    per_read_acc: List[float] = []
     exact_match = 0
     pred_seq_samples: List[str] = []
     ref_seq_samples: List[str] = []
@@ -383,14 +323,19 @@ def main() -> None:
             logits_btc = model(input_ids, attention_mask=attention_mask)
 
         logits_tbc = logits_btc.transpose(0, 1)
+        input_lengths = resolve_input_lengths(
+            input_ids,
+            attention_mask=attention_mask,
+            input_lengths=batch.get("input_lengths"),
+        )
         pred_ids = ctc_decode(
             logits_tbc,
             decoder=args.decoder,
             beam_width=args.beam_width,
             blank_idx=BLANK_IDX,
-            input_lengths=batch.get("input_lengths"),
-            ctc_crf_pad_blank=args.ctc_crf_pad_blank,
-            ctc_crf_blank_score=args.ctc_crf_blank_score,
+            input_lengths=input_lengths,
+            ctc_crf_pad_blank=args.ctc_crf_blank_score is not None,
+            ctc_crf_blank_score=float(args.ctc_crf_blank_score or 0.0),
             koi_beam_cut=args.koi_beam_cut,
             koi_scale=args.koi_scale,
             koi_offset=args.koi_offset,
@@ -399,8 +344,13 @@ def main() -> None:
         )
         ref_ids = batch["target_seqs"]
 
-        pbma = batch_pbma(pred_ids, ref_ids)
-        pbma_scores.append(pbma)
+        acc = batch_bonito_accuracy(
+            pred_ids,
+            ref_ids,
+            balanced=args.acc_balanced,
+            min_coverage=args.acc_min_coverage,
+        )
+        acc_scores.append(acc)
 
         for pred, ref in zip(pred_ids, ref_ids):
             read_idx += 1
@@ -408,8 +358,13 @@ def main() -> None:
             ref_seq = "".join(ID2BASE.get(i, "N") for i in ref)
             counts = error_counts(pred_seq, ref_seq)
             total_counts = merge_counts(total_counts, counts)
-            pbma_read = cal_per_base_match_accuracy(pred_seq, ref_seq)
-            per_read_pbma.append(pbma_read)
+            acc_read = cal_bonito_accuracy(
+                pred_seq,
+                ref_seq,
+                balanced=args.acc_balanced,
+                min_coverage=args.acc_min_coverage,
+            )
+            per_read_acc.append(acc_read)
             pred_lengths.append(len(pred_seq))
             ref_lengths.append(len(ref_seq))
             update_error_patterns(
@@ -434,7 +389,7 @@ def main() -> None:
                 qstr = q_char * len(pred_seq)
                 fastq_handle.write(f"@read_{read_idx}\n{pred_seq}\n+\n{qstr}\n")
 
-    pbma_avg = float(np.mean(pbma_scores)) if pbma_scores else 0.0
+    acc_avg = float(np.mean(acc_scores)) if acc_scores else 0.0
     ratios = counts_to_ratio(total_counts)
 
     out_dir = args.out_dir
@@ -442,9 +397,9 @@ def main() -> None:
     length_bins = init_length_bins()
     position_bins = init_position_bins()
     summary = {
-        "pbma": pbma_avg,
-        "read_level_pbma": float(np.mean(per_read_pbma)) if per_read_pbma else 0.0,
-        "read_exact_match_rate": exact_match / max(len(per_read_pbma), 1),
+        "accuracy": acc_avg,
+        "read_level_accuracy": float(np.mean(per_read_acc)) if per_read_acc else 0.0,
+        "read_exact_match_rate": exact_match / max(len(per_read_acc), 1),
         "counts": total_counts,
         "ratios": ratios,
         "mismatch_matrix": mismatch_matrix,
