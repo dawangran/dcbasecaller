@@ -483,8 +483,9 @@ def inspect_batch(
     target_seqs = batch["target_seqs"]  # list[list[int]]
 
     with torch.no_grad():
-        logits_tbc = model(input_ids=input_ids)
+        logits_btc = model(input_ids=input_ids)
 
+    logits_tbc = logits_btc.transpose(0, 1)
     pred_seqs = ctc_greedy_decode(logits_tbc, blank_idx=BLANK_IDX)
 
     B = len(pred_seqs)
