@@ -81,17 +81,6 @@ def chunk_tokens(tokens: List[str], max_tokens: int, overlap: int) -> List[List[
     return chunks
 
 
-def _infer_crf_expand_blanks(num_classes: int, n_base: int, max_state_len: int = 10) -> bool:
-    if n_base <= 0:
-        return False
-    for state_len in range(1, max_state_len + 1):
-        if num_classes == n_base ** (state_len + 1):
-            return True
-        if num_classes == (n_base + 1) * (n_base ** state_len):
-            return False
-    return False
-
-
 def _token_slice_to_base_idx(token_idx: int, token_len: int, base_len: int) -> int:
     if token_len <= 0 or base_len <= 0:
         return 0
@@ -194,23 +183,15 @@ def main():
     head_config = infer_head_config_from_state_dict(sd)
     # load model
     n_base = len(ID2BASE) - 1
-    expand_blanks = _infer_crf_expand_blanks(head_config["num_classes"], n_base)
     model = BasecallModel(
         model_path=args.model_name_or_path,
         num_classes=head_config["num_classes"],
         hidden_layer=args.hidden_layer,
-        head_kernel_size=head_config["head_kernel_size"],
-        head_layers=head_config["head_layers"],
-        head_use_pointwise=head_config["head_use_pointwise"],
-        head_use_transformer=head_config["head_use_transformer"],
-        head_transformer_layers=head_config["head_transformer_layers"],
-        head_transformer_heads=head_config["head_transformer_heads"],
-        head_linear=head_config.get("head_linear", False),
         head_output_activation=args.head_output_activation,
         head_output_scale=args.head_output_scale,
         head_crf_blank_score=float(args.koi_blank_score),
         head_crf_n_base=n_base,
-        head_crf_expand_blanks=expand_blanks,
+        head_crf_expand_blanks=True,
     ).to(device)
     model.load_state_dict(sd, strict=False)
     model.eval()

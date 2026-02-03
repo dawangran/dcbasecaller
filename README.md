@@ -115,13 +115,6 @@ basecall-train \
 - `--unfreeze_layer_start`, `--unfreeze_layer_end`: unfreeze layers in range `[start, end)`.
 
 **Head options**
-- `--head_kernel_size`: kernel size for depthwise conv.
-- `--head_layers`: number of depthwise residual blocks.
-- `--head_dropout`: dropout for head.
-- `--head_disable_pointwise`: disable pointwise conv (default is enabled).
-- `--head_use_transformer`: add transformer layers in head.
-- `--head_transformer_layers`, `--head_transformer_heads`, `--head_transformer_dropout`.
-- `--head_linear`: use a pure linear head (sets `head_layers=0`, disables pointwise/transformer blocks; uses LayerNorm + Linear only).
 - `--head_output_activation`: optional activation for head logits (e.g. `tanh` for Bonito-style scaling).
 - `--head_output_scale`: optional scalar multiplier for head logits (applied after activation).
 

@@ -532,21 +532,10 @@ def parse_args():
     p.add_argument("--unfreeze_layer_end", type=int, default=None,
                    help="Unfreeze backbone layers in [start, end). Optional finer control.")
 
-    p.add_argument("--head_kernel_size", type=int, default=5)
-    p.add_argument("--head_layers", type=int, default=2)
-    p.add_argument("--head_dropout", type=float, default=0.1)
-    p.add_argument("--head_disable_pointwise", action="store_true",
-                   help="Disable pointwise conv in head (default: enabled).")
-    p.add_argument("--head_use_transformer", action="store_true")
-    p.add_argument("--head_transformer_layers", type=int, default=1)
-    p.add_argument("--head_transformer_heads", type=int, default=4)
-    p.add_argument("--head_transformer_dropout", type=float, default=0.1)
     p.add_argument("--head_output_activation", choices=["tanh", "relu"], default=None,
                    help="Optional activation applied to head output logits.")
     p.add_argument("--head_output_scale", type=float, default=None,
                    help="Optional scalar applied to head output logits (after activation).")
-    p.add_argument("--head_linear", action="store_true",
-                   help="Use a pure linear head (disable conv/transformer head blocks).")
 
     p.add_argument("--acc_balanced", action="store_true",
                    help="Use Bonito balanced accuracy: (match - ins) / (match + mismatch + del).")
@@ -577,20 +566,12 @@ def main():
 
     # ---- model (先建模型拿 tokenizer，保持原数据逻辑) ----
     import os as _os
-    from . import ctc_crf as crf_backend
-
     _os.environ["CTC_CRF_STATE_LEN"] = str(args.ctc_crf_state_len)
     n_base = len(ID2BASE) - 1
     if n_base <= 0:
         raise ValueError("CTC-CRF alphabet must include at least one non-blank base.")
     # CTC-CRF head emits no-blank scores; blank is injected later with a fixed score.
     num_classes = (n_base ** args.ctc_crf_state_len) * n_base
-    head_blank_idx = None
-
-    if args.head_linear:
-        args.head_layers = 0
-        args.head_use_transformer = False
-        args.head_disable_pointwise = True
 
     base_model = BasecallModel(
         model_path=args.model_name_or_path,
@@ -601,16 +582,6 @@ def main():
         unfreeze_last_n_layers=args.unfreeze_last_n_layers,
         unfreeze_layer_start=args.unfreeze_layer_start,
         unfreeze_layer_end=args.unfreeze_layer_end,
-        head_kernel_size=args.head_kernel_size,
-        head_layers=args.head_layers,
-        head_dropout=args.head_dropout,
-        head_use_pointwise=not bool(args.head_disable_pointwise),
-        head_use_transformer=bool(args.head_use_transformer),
-        head_transformer_layers=args.head_transformer_layers,
-        head_transformer_heads=args.head_transformer_heads,
-        head_transformer_dropout=args.head_transformer_dropout,
-        head_linear=bool(args.head_linear),
-        head_blank_idx=head_blank_idx,
         head_output_activation=args.head_output_activation,
         head_output_scale=args.head_output_scale,
         head_crf_blank_score=float(args.ctc_crf_blank_score),
