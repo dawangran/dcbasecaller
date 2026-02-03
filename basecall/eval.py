@@ -86,6 +86,17 @@ def counts_to_ratio(counts: Dict[str, int]) -> Dict[str, float]:
     return {k: float(v) / float(denom) for k, v in counts.items()}
 
 
+def _ids_to_bases(ids: List[int]) -> str:
+    bases: List[str] = []
+    for i in ids:
+        if i == 0:
+            continue
+        base = ID2BASE.get(i, "")
+        if base:
+            bases.append(base)
+    return "".join(bases)
+
+
 def _normalize_base(ch: str) -> str:
     ch = (ch or "N").upper()
     if ch in {"A", "T", "G", "C"}:
@@ -353,8 +364,8 @@ def main() -> None:
 
         for pred, ref in zip(pred_ids, ref_ids):
             read_idx += 1
-            pred_seq = "".join(ID2BASE.get(i, "N") for i in pred)
-            ref_seq = "".join(ID2BASE.get(i, "N") for i in ref)
+            pred_seq = _ids_to_bases(pred)
+            ref_seq = _ids_to_bases(ref)
             counts = error_counts(pred_seq, ref_seq)
             total_counts = merge_counts(total_counts, counts)
             acc_read = cal_bonito_accuracy(

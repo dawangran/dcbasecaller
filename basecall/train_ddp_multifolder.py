@@ -24,6 +24,7 @@ import argparse
 import matplotlib.pyplot as plt
 import logging
 from typing import Tuple, Optional, Any, Dict
+import numpy as np
 
 import torch
 import torch.distributed as dist
@@ -324,10 +325,12 @@ def eval_one_epoch(
     ctc_crf_blank_score: float,
     acc_balanced: bool,
     acc_min_coverage: float,
-):
+) -> Tuple[float, float, float, float]:
     model.eval()
     total_loss, n_batches = 0.0, 0
     total_acc, n_acc = 0.0, 0
+    total_cov, n_cov = 0.0, 0
+    blank_probs: List[float] = []
 
     it = tqdm(data_loader, total=len(data_loader),
               disable=not is_main_process(rank), desc=f"[{split_name}]")
@@ -361,6 +364,8 @@ def eval_one_epoch(
         )
         total_loss += float(loss.item())
         n_batches += 1
+        blank_prob = torch.softmax(logits_btc, dim=-1)[..., BLANK_IDX].mean().item()
+        blank_probs.append(blank_prob)
 
         pred_seqs = koi_beam_search_decode(
             logits_tbc,
@@ -375,13 +380,21 @@ def eval_one_epoch(
         )
         total_acc += float(acc)
         n_acc += 1
+        for p_ids, r_ids in zip(pred_seqs, batch["target_seqs"]):
+            ref_len = max(len(r_ids), 1)
+            total_cov += len(p_ids) / ref_len
+            n_cov += 1
 
     avg_loss = total_loss / max(n_batches, 1)
     avg_acc = total_acc / max(n_acc, 1)
+    avg_cov = total_cov / max(n_cov, 1)
+    avg_blank = float(np.mean(blank_probs)) if blank_probs else 0.0
 
     avg_loss = float(reduce_mean(torch.tensor(avg_loss, device=device)).item())
     avg_acc = float(reduce_mean(torch.tensor(avg_acc, device=device)).item())
-    return avg_loss, avg_acc
+    avg_cov = float(reduce_mean(torch.tensor(avg_cov, device=device)).item())
+    avg_blank = float(reduce_mean(torch.tensor(avg_blank, device=device)).item())
+    return avg_loss, avg_acc, avg_cov, avg_blank
 
 
 # -------------------- pretrained loader (keep) --------------------
@@ -794,7 +807,7 @@ def main():
         if val_loader is not None:
             if val_sampler is not None:
                 val_sampler.set_epoch(epoch)
-            val_loss, val_acc = eval_one_epoch(
+            val_loss, val_acc, val_cov, val_blank = eval_one_epoch(
                 model,
                 val_loader,
                 device,
@@ -808,9 +821,20 @@ def main():
             val_accs.append(val_acc)
 
             if is_main_process(rank):
-                logger.info(f"[Val] epoch={epoch} loss={val_loss:.4f} acc={val_acc:.4f}")
+                logger.info(
+                    f"[Val] epoch={epoch} loss={val_loss:.4f} acc={val_acc:.4f} "
+                    f"coverage={val_cov:.4f} blank={val_blank:.4f}"
+                )
                 if use_wandb and wandb is not None:
-                    wandb.log({"val/loss": float(val_loss), "val/acc": float(val_acc), "epoch": epoch})
+                    wandb.log(
+                        {
+                            "val/loss": float(val_loss),
+                            "val/acc": float(val_acc),
+                            "val/coverage": float(val_cov),
+                            "val/blank": float(val_blank),
+                            "epoch": epoch,
+                        }
+                    )
 
         # ---- checkpoint save ----
         if is_main_process(rank) and (epoch % max(args.save_every, 1) == 0):
@@ -846,7 +870,7 @@ def main():
 
     # ---- test ----
     if test_loader is not None:
-        test_loss, test_acc = eval_one_epoch(
+        test_loss, test_acc, test_cov, test_blank = eval_one_epoch(
             model,
             test_loader,
             device,
@@ -857,9 +881,19 @@ def main():
             args.acc_min_coverage,
         )
         if is_main_process(rank):
-            logger.info(f"[Test] loss={test_loss:.4f} acc={test_acc:.4f}")
+            logger.info(
+                f"[Test] loss={test_loss:.4f} acc={test_acc:.4f} "
+                f"coverage={test_cov:.4f} blank={test_blank:.4f}"
+            )
             if use_wandb and wandb is not None:
-                wandb.log({"test/loss": float(test_loss), "test/acc": float(test_acc)})
+                wandb.log(
+                    {
+                        "test/loss": float(test_loss),
+                        "test/acc": float(test_acc),
+                        "test/coverage": float(test_cov),
+                        "test/blank": float(test_blank),
+                    }
+                )
 
     # ---- final save curves/csv ----
     if is_main_process(rank):

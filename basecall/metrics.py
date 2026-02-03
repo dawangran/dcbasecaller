@@ -234,6 +234,17 @@ def cal_per_base_match_accuracy(pred_seq: str, ref_seq: str) -> float:
     return match / ref_len if ref_len > 0 else 0.0
 
 
+def _ids_to_bases(ids: List[int], drop_blank: bool = True) -> str:
+    bases: List[str] = []
+    for i in ids:
+        if drop_blank and i == BLANK_IDX:
+            continue
+        base = ID2BASE.get(i, "")
+        if base:
+            bases.append(base)
+    return "".join(bases)
+
+
 def cal_bonito_accuracy(
     pred_seq: str,
     ref_seq: str,
@@ -281,8 +292,8 @@ def batch_pbma(
     total_match = 0
     total_ref = 0
     for p_ids, r_ids in zip(pred_seqs, ref_seqs):
-        p_str = "".join(ID2BASE.get(i, "N") for i in p_ids)
-        r_str = "".join(ID2BASE.get(i, "N") for i in r_ids)
+        p_str = _ids_to_bases(p_ids, drop_blank=True)
+        r_str = _ids_to_bases(r_ids, drop_blank=True)
         match, ref_len = _pbma_counts(p_str, r_str)
         total_match += match
         total_ref += ref_len
@@ -303,8 +314,8 @@ def batch_bonito_accuracy(
         return 0.0
     scores = []
     for p_ids, r_ids in zip(pred_seqs, ref_seqs):
-        p_str = "".join(ID2BASE.get(i, "N") for i in p_ids)
-        r_str = "".join(ID2BASE.get(i, "N") for i in r_ids)
+        p_str = _ids_to_bases(p_ids, drop_blank=True)
+        r_str = _ids_to_bases(r_ids, drop_blank=True)
         scores.append(cal_bonito_accuracy(p_str, r_str, balanced=balanced, min_coverage=min_coverage))
     return float(np.mean(scores)) if scores else 0.0
 
