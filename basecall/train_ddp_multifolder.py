@@ -23,7 +23,7 @@ import os
 import argparse
 import matplotlib.pyplot as plt
 import logging
-from typing import Tuple, Optional, Any, Dict
+from typing import Tuple, Optional, Any, Dict, List
 import numpy as np
 
 import torch
@@ -325,12 +325,13 @@ def eval_one_epoch(
     ctc_crf_blank_score: float,
     acc_balanced: bool,
     acc_min_coverage: float,
-) -> Tuple[float, float, float, float]:
+) -> Tuple[float, float, float, float, float]:
     model.eval()
     total_loss, n_batches = 0.0, 0
     total_acc, n_acc = 0.0, 0
     total_cov, n_cov = 0.0, 0
-    blank_probs: List[float] = []
+    blank_ratios: List[float] = []
+    nonzero_lengths: List[int] = []
 
     it = tqdm(data_loader, total=len(data_loader),
               disable=not is_main_process(rank), desc=f"[{split_name}]")
@@ -364,9 +365,6 @@ def eval_one_epoch(
         )
         total_loss += float(loss.item())
         n_batches += 1
-        blank_prob = torch.softmax(logits_btc, dim=-1)[..., BLANK_IDX].mean().item()
-        blank_probs.append(blank_prob)
-
         pred_seqs = koi_beam_search_decode(
             logits_tbc,
             blank_score=float(ctc_crf_blank_score),
@@ -381,20 +379,27 @@ def eval_one_epoch(
         total_acc += float(acc)
         n_acc += 1
         for p_ids, r_ids in zip(pred_seqs, batch["target_seqs"]):
+            seq_len = len(p_ids)
+            zero_count = sum(1 for token in p_ids if token == BLANK_IDX)
+            blank_ratios.append(zero_count / max(seq_len, 1))
+            nonzero_len = seq_len - zero_count
+            nonzero_lengths.append(nonzero_len)
             ref_len = max(len(r_ids), 1)
-            total_cov += len(p_ids) / ref_len
+            total_cov += nonzero_len / ref_len
             n_cov += 1
 
     avg_loss = total_loss / max(n_batches, 1)
     avg_acc = total_acc / max(n_acc, 1)
     avg_cov = total_cov / max(n_cov, 1)
-    avg_blank = float(np.mean(blank_probs)) if blank_probs else 0.0
+    avg_blank = float(np.mean(blank_ratios)) if blank_ratios else 0.0
+    avg_nonzero_len = float(np.mean(nonzero_lengths)) if nonzero_lengths else 0.0
 
     avg_loss = float(reduce_mean(torch.tensor(avg_loss, device=device)).item())
     avg_acc = float(reduce_mean(torch.tensor(avg_acc, device=device)).item())
     avg_cov = float(reduce_mean(torch.tensor(avg_cov, device=device)).item())
     avg_blank = float(reduce_mean(torch.tensor(avg_blank, device=device)).item())
-    return avg_loss, avg_acc, avg_cov, avg_blank
+    avg_nonzero_len = float(reduce_mean(torch.tensor(avg_nonzero_len, device=device)).item())
+    return avg_loss, avg_acc, avg_cov, avg_blank, avg_nonzero_len
 
 
 # -------------------- pretrained loader (keep) --------------------
@@ -498,6 +503,8 @@ def parse_args():
     p.add_argument("--batch_size", type=int, default=128)
     p.add_argument("--num_epochs", type=int, default=50)
     p.add_argument("--num_workers", type=int, default=4)
+    p.add_argument("--quick_train", action="store_true",
+                   help="Quick train mode: freeze backbone, set num_epochs=1, ctc_crf_state_len=5 (5120 classes).")
 
     p.add_argument("--lr", type=float, default=3e-4)
     p.add_argument("--weight_decay", type=float, default=1e-3)
@@ -552,8 +559,17 @@ def parse_args():
 
 # -------------------- main --------------------
 
+def apply_quick_train_overrides(args) -> None:
+    if not args.quick_train:
+        return
+    args.freeze_backbone = True
+    args.num_epochs = 1
+    args.ctc_crf_state_len = 5
+
+
 def main():
     args = parse_args()
+    apply_quick_train_overrides(args)
     rank, world_size, local_rank, device, ddp_enabled = init_distributed()
 
     seed_everything(args.seed + rank)
@@ -563,6 +579,8 @@ def main():
     if is_main_process(rank):
         logger.info(f"[DDP] world_size={world_size}, rank={rank}, local_rank={local_rank}, device={device}")
         logger.info(f"[Args] {vars(args)}")
+        if args.quick_train:
+            logger.info("[Quick Train] enabled: freeze_backbone=True, num_epochs=1, ctc_crf_state_len=5 (5120 classes)")
 
     # ---- model (先建模型拿 tokenizer，保持原数据逻辑) ----
     import os as _os
@@ -783,7 +801,7 @@ def main():
         if val_loader is not None:
             if val_sampler is not None:
                 val_sampler.set_epoch(epoch)
-            val_loss, val_acc, val_cov, val_blank = eval_one_epoch(
+            val_loss, val_acc, val_cov, val_blank, val_nonzero_len = eval_one_epoch(
                 model,
                 val_loader,
                 device,
@@ -799,7 +817,7 @@ def main():
             if is_main_process(rank):
                 logger.info(
                     f"[Val] epoch={epoch} loss={val_loss:.4f} acc={val_acc:.4f} "
-                    f"coverage={val_cov:.4f} blank={val_blank:.4f}"
+                    f"coverage={val_cov:.4f} blank={val_blank:.4f} nonzero_len={val_nonzero_len:.2f}"
                 )
                 if use_wandb and wandb is not None:
                     wandb.log(
@@ -808,6 +826,7 @@ def main():
                             "val/acc": float(val_acc),
                             "val/coverage": float(val_cov),
                             "val/blank": float(val_blank),
+                            "val/nonzero_len": float(val_nonzero_len),
                             "epoch": epoch,
                         }
                     )
@@ -846,7 +865,7 @@ def main():
 
     # ---- test ----
     if test_loader is not None:
-        test_loss, test_acc, test_cov, test_blank = eval_one_epoch(
+        test_loss, test_acc, test_cov, test_blank, test_nonzero_len = eval_one_epoch(
             model,
             test_loader,
             device,
@@ -859,7 +878,7 @@ def main():
         if is_main_process(rank):
             logger.info(
                 f"[Test] loss={test_loss:.4f} acc={test_acc:.4f} "
-                f"coverage={test_cov:.4f} blank={test_blank:.4f}"
+                f"coverage={test_cov:.4f} blank={test_blank:.4f} nonzero_len={test_nonzero_len:.2f}"
             )
             if use_wandb and wandb is not None:
                 wandb.log(
@@ -868,6 +887,7 @@ def main():
                         "test/acc": float(test_acc),
                         "test/coverage": float(test_cov),
                         "test/blank": float(test_blank),
+                        "test/nonzero_len": float(test_nonzero_len),
                     }
                 )
 

@@ -138,6 +138,7 @@ basecall-train \
 
 **Runtime**
 - `--num_workers`, `--seed`, `--log_interval`, `--output_dir`.
+- `--quick_train`: freeze backbone, set `num_epochs=1`, and force `ctc_crf_state_len=5` (5120 classes).
 
 ---
 

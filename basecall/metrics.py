@@ -213,27 +213,6 @@ def _alignment_counts_parasail(pred_seq: str, ref_seq: str) -> tuple[Dict[str, i
     return counts, r_coverage
 
 
-def _pbma_counts(pred_seq: str, ref_seq: str) -> Tuple[int, int]:
-    """
-    返回 (match, ref_len)，其中 ref_len = match + mismatch + del.
-    以参考序列为基准计算 PBMA，忽略插入项对分母的影响。
-    """
-    if not ref_seq:
-        return 0, 0
-    if not pred_seq:
-        return 0, len(ref_seq)
-
-    counts = _alignment_counts(pred_seq, ref_seq)
-    ref_len = counts["match"] + counts["mismatch"] + counts["del"]
-    return counts["match"], ref_len
-
-
-def cal_per_base_match_accuracy(pred_seq: str, ref_seq: str) -> float:
-    """PBMA = match / ref_len (ref_len = match + mismatch + del)"""
-    match, ref_len = _pbma_counts(pred_seq, ref_seq)
-    return match / ref_len if ref_len > 0 else 0.0
-
-
 def _ids_to_bases(ids: List[int], drop_blank: bool = True) -> str:
     bases: List[str] = []
     for i in ids:
@@ -278,26 +257,6 @@ def cal_bonito_accuracy(
         denom = counts["match"] + counts["mismatch"] + counts["del"] + counts["ins"]
         score = counts["match"] / denom if denom > 0 else 0.0
     return float(score * 100.0)
-
-
-def batch_pbma(
-    pred_seqs: List[List[int]],
-    ref_seqs: List[List[int]],
-) -> float:
-    """
-    计算一个 batch 的 PBMA（按参考长度加权）
-    pred_seqs/ref_seqs: list[list[int]]，标签 1..4
-    """
-    assert len(pred_seqs) == len(ref_seqs)
-    total_match = 0
-    total_ref = 0
-    for p_ids, r_ids in zip(pred_seqs, ref_seqs):
-        p_str = _ids_to_bases(p_ids, drop_blank=True)
-        r_str = _ids_to_bases(r_ids, drop_blank=True)
-        match, ref_len = _pbma_counts(p_str, r_str)
-        total_match += match
-        total_ref += ref_len
-    return float(total_match) / float(total_ref) if total_ref > 0 else 0.0
 
 
 def batch_bonito_accuracy(
