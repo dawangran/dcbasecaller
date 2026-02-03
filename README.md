@@ -239,7 +239,6 @@ basecall-infer \
 - `--device`, `--amp`.
 - `--max_tokens`: maximum token count per chunk when splitting long inputs.
 - `--overlap`: overlap token count between chunks.
-- `--overlap_bases`: optional max overlap (bases) for sequence-based trimming.
 - `--batch_size`: number of reads per inference batch.
 - `--hidden_layer`: which backbone hidden state to use (default: -1).
 
@@ -250,7 +249,7 @@ basecall-infer \
 
 **Chunking**
 - Long `text` fields are split into token chunks, decoded independently, then concatenated.
-- Overlap trimming is sequence-based: the suffix of the previous chunk output is matched against the prefix of the next chunk output, up to `overlap_bases` (or a proportional estimate from `--overlap`).
+- Overlap trimming follows chunk boundaries: each chunk keeps the non-overlap core based on `--max_tokens` and `--overlap`.
 
 ---
 

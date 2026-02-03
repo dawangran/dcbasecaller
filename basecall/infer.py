@@ -81,16 +81,6 @@ def chunk_tokens(tokens: List[str], max_tokens: int, overlap: int) -> List[List[
     return chunks
 
 
-def find_sequence_overlap(prev_seq: str, next_seq: str, max_overlap: int) -> int:
-    if max_overlap <= 0:
-        return 0
-    max_overlap = min(max_overlap, len(prev_seq), len(next_seq))
-    for k in range(max_overlap, 0, -1):
-        if prev_seq[-k:] == next_seq[:k]:
-            return k
-    return 0
-
-
 def _infer_crf_expand_blanks(num_classes: int, n_base: int, max_state_len: int = 10) -> bool:
     if n_base <= 0:
         return False
@@ -100,6 +90,54 @@ def _infer_crf_expand_blanks(num_classes: int, n_base: int, max_state_len: int =
         if num_classes == (n_base + 1) * (n_base ** state_len):
             return False
     return False
+
+
+def _token_slice_to_base_idx(token_idx: int, token_len: int, base_len: int) -> int:
+    if token_len <= 0 or base_len <= 0:
+        return 0
+    return int(round(token_idx * base_len / token_len))
+
+
+def stitch_sequences(
+    chunk_seqs: List[str],
+    chunk_qs: List[str],
+    chunk_token_lengths: List[int],
+    total_tokens: int,
+    chunksize: int,
+    overlap: int,
+) -> Tuple[str, str]:
+    if not chunk_seqs:
+        return "", ""
+    if len(chunk_seqs) == 1:
+        return chunk_seqs[0], chunk_qs[0]
+    if overlap <= 0 or chunksize <= 0:
+        return "".join(chunk_seqs), "".join(chunk_qs)
+
+    semi_overlap = overlap // 2
+    start_tok = semi_overlap
+    end_tok = chunksize - semi_overlap
+    stub = (total_tokens - overlap) % (chunksize - overlap)
+    first_chunk_end_tok = (stub + semi_overlap) if stub > 0 else end_tok
+
+    stitched_seq: List[str] = []
+    stitched_q: List[str] = []
+
+    for idx, (seq, q, token_len) in enumerate(zip(chunk_seqs, chunk_qs, chunk_token_lengths)):
+        if idx == 0:
+            end_idx = _token_slice_to_base_idx(first_chunk_end_tok, token_len, len(seq))
+            stitched_seq.append(seq[:end_idx])
+            stitched_q.append(q[:end_idx])
+        elif idx == len(chunk_seqs) - 1:
+            start_idx = _token_slice_to_base_idx(start_tok, token_len, len(seq))
+            stitched_seq.append(seq[start_idx:])
+            stitched_q.append(q[start_idx:])
+        else:
+            start_idx = _token_slice_to_base_idx(start_tok, token_len, len(seq))
+            end_idx = _token_slice_to_base_idx(end_tok, token_len, len(seq))
+            stitched_seq.append(seq[start_idx:end_idx])
+            stitched_q.append(q[start_idx:end_idx])
+
+    return "".join(stitched_seq), "".join(stitched_q)
 
 
 # --------------------------
@@ -130,7 +168,6 @@ def main():
     ap.add_argument("--batch_size", type=int, default=4)
     ap.add_argument("--max_tokens", type=int, default=2048)
     ap.add_argument("--overlap", type=int, default=128)
-    ap.add_argument("--overlap_bases", type=int, default=None)
     ap.add_argument("--hidden_layer", type=int, default=-1)
     ap.add_argument("--head_output_activation", choices=["tanh", "relu"], default=None,
                     help="Optional activation applied to head output logits.")
@@ -225,22 +262,14 @@ def main():
                     chunk_qs.append(qstring)
 
             if args.overlap > 0 and chunk_seqs:
-                trimmed_seqs = [chunk_seqs[0]]
-                trimmed_qs = [chunk_qs[0]]
-                for idx, (seq, q) in enumerate(zip(chunk_seqs[1:], chunk_qs[1:]), start=1):
-                    token_len = chunk_token_lengths[idx] if idx < len(chunk_token_lengths) else 0
-                    if token_len <= 0:
-                        max_overlap = 0
-                    else:
-                        max_overlap = int(round(len(seq) * args.overlap / token_len))
-                    if args.overlap_bases is not None:
-                        max_overlap = args.overlap_bases
-                    max_overlap = min(len(seq), max(0, max_overlap))
-                    trim = find_sequence_overlap(trimmed_seqs[-1], seq, max_overlap)
-                    trimmed_seqs.append(seq[trim:])
-                    trimmed_qs.append(q[trim:])
-                full_seq = "".join(trimmed_seqs)
-                full_q = "".join(trimmed_qs)
+                full_seq, full_q = stitch_sequences(
+                    chunk_seqs,
+                    chunk_qs,
+                    chunk_token_lengths,
+                    total_tokens=len(tokens),
+                    chunksize=args.max_tokens,
+                    overlap=args.overlap,
+                )
             else:
                 full_seq = "".join(chunk_seqs)
                 full_q = "".join(chunk_qs)
