@@ -2,6 +2,8 @@
 from typing import List, Dict, Any, Optional, Tuple
 import csv
 import os
+import re
+import importlib.util
 
 import numpy as np
 import torch
@@ -11,6 +13,12 @@ from matplotlib.ticker import MaxNLocator
 import edlib
 
 from .utils import BLANK_IDX, ID2BASE, BASE2ID
+
+_PARASAIL_AVAILABLE = importlib.util.find_spec("parasail") is not None
+if _PARASAIL_AVAILABLE:
+    import parasail  # type: ignore
+
+_SPLIT_CIGAR = re.compile(r"(\d+)([=XID])")
 
 
 def koi_beam_search_decode(
@@ -161,6 +169,50 @@ def _alignment_counts(pred_seq: str, ref_seq: str) -> Dict[str, int]:
     return counts
 
 
+def _parasail_to_sam(result, seq: str) -> tuple[int, str]:
+    cigstr = result.cigar.decode.decode()
+    first = _SPLIT_CIGAR.search(cigstr)
+    if first is None:
+        return result.cigar.beg_ref, cigstr
+
+    first_count, first_op = first.groups()
+    prefix = first.group()
+    rstart = result.cigar.beg_ref
+    cliplen = result.cigar.beg_query
+
+    clip = "" if cliplen == 0 else f"{cliplen}S"
+    if first_op == "I":
+        pre = f"{int(first_count) + cliplen}S"
+    elif first_op == "D":
+        pre = clip
+        rstart = int(first_count)
+    else:
+        pre = f"{clip}{prefix}"
+
+    mid = cigstr[len(prefix):]
+    end_clip = len(seq) - result.end_query - 1
+    suf = f"{end_clip}S" if end_clip > 0 else ""
+    new_cigstr = "".join((pre, mid, suf))
+    return rstart, new_cigstr
+
+
+def _alignment_counts_parasail(pred_seq: str, ref_seq: str) -> tuple[Dict[str, int], float]:
+    alignment = parasail.sw_trace_striped_32(pred_seq, ref_seq, 8, 4, parasail.dnafull)
+    _, cigar = _parasail_to_sam(alignment, pred_seq)
+    counts = {"match": 0, "mismatch": 0, "ins": 0, "del": 0}
+    for count, op in _SPLIT_CIGAR.findall(cigar):
+        if op == "=":
+            counts["match"] += int(count)
+        elif op == "X":
+            counts["mismatch"] += int(count)
+        elif op == "D":
+            counts["del"] += int(count)
+        elif op == "I":
+            counts["ins"] += int(count)
+    r_coverage = len(alignment.traceback.ref) / max(len(ref_seq), 1)
+    return counts, r_coverage
+
+
 def _pbma_counts(pred_seq: str, ref_seq: str) -> Tuple[int, int]:
     """
     返回 (match, ref_len)，其中 ref_len = match + mismatch + del.
@@ -197,13 +249,14 @@ def cal_bonito_accuracy(
     if not pred_seq or not ref_seq:
         return 0.0
 
-    counts = _alignment_counts(pred_seq, ref_seq)
-    query_len = counts["match"] + counts["mismatch"] + counts["ins"]
-    ref_len = counts["match"] + counts["mismatch"] + counts["del"]
-
-    if ref_len <= 0:
-        return 0.0
-    r_coverage = ref_len / max(len(ref_seq), 1)
+    if _PARASAIL_AVAILABLE:
+        counts, r_coverage = _alignment_counts_parasail(pred_seq, ref_seq)
+    else:
+        counts = _alignment_counts(pred_seq, ref_seq)
+        ref_len = counts["match"] + counts["mismatch"] + counts["del"]
+        if ref_len <= 0:
+            return 0.0
+        r_coverage = ref_len / max(len(ref_seq), 1)
     if r_coverage < min_coverage:
         return 0.0
 
