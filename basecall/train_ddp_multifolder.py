@@ -580,7 +580,11 @@ def main():
     from . import ctc_crf as crf_backend
 
     _os.environ["CTC_CRF_STATE_LEN"] = str(args.ctc_crf_state_len)
-    num_classes = crf_backend.crf_num_classes_no_blank(args.ctc_crf_state_len)
+    n_base = len(ID2BASE) - 1
+    if n_base <= 0:
+        raise ValueError("CTC-CRF alphabet must include at least one non-blank base.")
+    # CTC-CRF head emits no-blank scores; blank is injected later with a fixed score.
+    num_classes = (n_base ** args.ctc_crf_state_len) * n_base
     head_blank_idx = None
 
     if args.head_linear:
@@ -588,7 +592,6 @@ def main():
         args.head_use_transformer = False
         args.head_disable_pointwise = True
 
-    n_base = len(ID2BASE) - 1
     base_model = BasecallModel(
         model_path=args.model_name_or_path,
         num_classes=num_classes if num_classes is not None else None,
