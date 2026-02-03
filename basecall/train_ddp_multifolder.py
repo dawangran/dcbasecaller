@@ -504,7 +504,7 @@ def parse_args():
     p.add_argument("--num_epochs", type=int, default=50)
     p.add_argument("--num_workers", type=int, default=4)
     p.add_argument("--quick_train", action="store_true",
-                   help="Quick train mode: freeze backbone, set num_epochs=1, ctc_crf_state_len=5 (5120 classes).")
+                   help="Quick train mode: freeze backbone and force ctc_crf_state_len=5 (5120 classes).")
 
     p.add_argument("--lr", type=float, default=3e-4)
     p.add_argument("--weight_decay", type=float, default=1e-3)
@@ -563,7 +563,6 @@ def apply_quick_train_overrides(args) -> None:
     if not args.quick_train:
         return
     args.freeze_backbone = True
-    args.num_epochs = 1
     args.ctc_crf_state_len = 5
 
 
@@ -580,7 +579,7 @@ def main():
         logger.info(f"[DDP] world_size={world_size}, rank={rank}, local_rank={local_rank}, device={device}")
         logger.info(f"[Args] {vars(args)}")
         if args.quick_train:
-            logger.info("[Quick Train] enabled: freeze_backbone=True, num_epochs=1, ctc_crf_state_len=5 (5120 classes)")
+            logger.info("[Quick Train] enabled: freeze_backbone=True, ctc_crf_state_len=5 (5120 classes)")
 
     # ---- model (先建模型拿 tokenizer，保持原数据逻辑) ----
     import os as _os
