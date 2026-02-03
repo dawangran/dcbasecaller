@@ -291,6 +291,7 @@ def main() -> None:
         head_use_transformer=head_config["head_use_transformer"],
         head_transformer_layers=head_config["head_transformer_layers"],
         head_transformer_heads=head_config["head_transformer_heads"],
+        head_linear=head_config.get("head_linear", False),
         head_output_activation=args.head_output_activation,
         head_output_scale=args.head_output_scale,
         head_crf_blank_score=float(args.koi_blank_score),

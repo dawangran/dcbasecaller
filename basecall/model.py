@@ -1,10 +1,70 @@
 # -*- coding: utf-8 -*-
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from transformers import AutoTokenizer, AutoModel
 
-from .utils import NUM_CLASSES
+from .utils import NUM_CLASSES, ID2BASE
+
+
+class LinearCRFEncoder(nn.Module):
+    def __init__(
+        self,
+        insize: int,
+        n_base: int,
+        state_len: int,
+        bias: bool = True,
+        scale: float | None = None,
+        activation: str | None = None,
+        blank_score: float | None = None,
+        expand_blanks: bool = True,
+        permute: tuple[int, ...] | None = None,
+    ) -> None:
+        super().__init__()
+        if n_base <= 0:
+            raise ValueError("n_base must be >= 1.")
+        if state_len < 0:
+            raise ValueError("state_len must be >= 0.")
+        self.scale = scale
+        self.n_base = n_base
+        self.state_len = state_len
+        self.blank_score = blank_score
+        self.expand_blanks = expand_blanks
+        size = (n_base + 1) * n_base**state_len if blank_score is None else n_base ** (state_len + 1)
+        self.linear = nn.Linear(insize, size, bias=bias)
+        if activation is None:
+            self.activation = None
+        elif activation == "tanh":
+            self.activation = torch.tanh
+        elif activation == "relu":
+            self.activation = torch.relu
+        elif activation == "gelu":
+            self.activation = torch.nn.functional.gelu
+        else:
+            raise ValueError(f"Unknown activation: {activation}")
+        self.permute = permute
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.permute is not None:
+            x = x.permute(*self.permute)
+        scores = self.linear(x)
+        if self.activation is not None:
+            scores = self.activation(scores)
+        if self.scale is not None:
+            scores = scores * self.scale
+        if self.blank_score is not None and self.expand_blanks:
+            if not scores.is_contiguous():
+                scores = scores.contiguous()
+            bsz, t_len, n_scores = scores.shape
+            if n_scores % self.n_base != 0:
+                raise ValueError("CRF score dim must be divisible by n_base for blank expansion.")
+            scores = F.pad(
+                scores.view(bsz, t_len, n_scores // self.n_base, self.n_base),
+                (1, 0),
+                value=float(self.blank_score),
+            ).view(bsz, t_len, -1)
+        return scores
 
 
 class BasecallHead(nn.Module):
@@ -33,6 +93,8 @@ class BasecallHead(nn.Module):
         crf_expand_blanks: bool = True,
     ):
         super().__init__()
+        if use_transformer and num_layers > 0:
+            raise ValueError("Convolution blocks and transformer encoder are mutually exclusive.")
         self.norm = nn.LayerNorm(hidden_size)
         if num_layers < 0:
             raise ValueError("num_layers must be >= 0.")
@@ -144,11 +206,13 @@ class BasecallModel(nn.Module):
         head_transformer_layers: int = 1,
         head_transformer_heads: int = 4,
         head_transformer_dropout: float = 0.1,
+        head_linear: bool = False,
         head_blank_idx: int | None = 0,
         head_output_activation: str | None = None,
         head_output_scale: float | None = None,
         head_crf_blank_score: float | None = None,
         head_crf_n_base: int | None = None,
+        head_crf_state_len: int | None = None,
         head_crf_expand_blanks: bool = True,
     ):
         super().__init__()
@@ -215,24 +279,51 @@ class BasecallModel(nn.Module):
         if num_classes is None:
             num_classes = NUM_CLASSES
 
-        self.base_head = BasecallHead(
-            hidden_size=hidden_size,
-            num_classes=num_classes,
-            blank_idx=head_blank_idx,
-            kernel_size=head_kernel_size,
-            num_layers=head_layers,
-            dropout=head_dropout,
-            use_pointwise=head_use_pointwise,
-            use_transformer=head_use_transformer,
-            transformer_layers=head_transformer_layers,
-            transformer_heads=head_transformer_heads,
-            transformer_dropout=head_transformer_dropout,
-            output_activation=head_output_activation,
-            output_scale=head_output_scale,
-            crf_blank_score=head_crf_blank_score,
-            crf_n_base=head_crf_n_base,
-            crf_expand_blanks=head_crf_expand_blanks,
-        )
+        if head_use_transformer:
+            head_layers = 0
+
+        if head_linear:
+            n_base = head_crf_n_base if head_crf_n_base is not None else (len(ID2BASE) - 1)
+            if head_crf_state_len is None:
+                if n_base <= 1:
+                    raise ValueError("Cannot infer head_crf_state_len with n_base <= 1.")
+                if head_crf_blank_score is None:
+                    base = num_classes / (n_base + 1)
+                else:
+                    base = num_classes
+                state_len = math.log(base, n_base) - 1
+                if not math.isclose(state_len, round(state_len)):
+                    raise ValueError("Unable to infer head_crf_state_len from num_classes and n_base.")
+                head_crf_state_len = int(round(state_len))
+            self.base_head = LinearCRFEncoder(
+                insize=hidden_size,
+                n_base=n_base,
+                state_len=head_crf_state_len,
+                bias=True,
+                scale=head_output_scale,
+                activation=head_output_activation,
+                blank_score=head_crf_blank_score,
+                expand_blanks=head_crf_expand_blanks,
+            )
+        else:
+            self.base_head = BasecallHead(
+                hidden_size=hidden_size,
+                num_classes=num_classes,
+                blank_idx=head_blank_idx,
+                kernel_size=head_kernel_size,
+                num_layers=head_layers,
+                dropout=head_dropout,
+                use_pointwise=head_use_pointwise,
+                use_transformer=head_use_transformer,
+                transformer_layers=head_transformer_layers,
+                transformer_heads=head_transformer_heads,
+                transformer_dropout=head_transformer_dropout,
+                output_activation=head_output_activation,
+                output_scale=head_output_scale,
+                crf_blank_score=head_crf_blank_score,
+                crf_n_base=head_crf_n_base,
+                crf_expand_blanks=head_crf_expand_blanks,
+            )
 
     def _get_transformer_layers(self) -> nn.ModuleList:
         candidates = (

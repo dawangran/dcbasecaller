@@ -97,6 +97,9 @@ def infer_head_config_from_state_dict(
         weight = state_dict.get("base_head.proj.weight")
         if isinstance(weight, torch.Tensor) and weight.dim() == 2:
             return int(weight.shape[0])
+        weight = state_dict.get("base_head.linear.weight")
+        if isinstance(weight, torch.Tensor) and weight.dim() == 2:
+            return int(weight.shape[0])
         return int(default_num_classes)
 
     def _infer_transformer_layers() -> int:
@@ -111,6 +114,7 @@ def infer_head_config_from_state_dict(
         return max(indices) + 1
 
     inferred_transformer_layers = _infer_transformer_layers()
+    head_linear = "base_head.linear.weight" in state_dict
     return {
         "head_layers": int(_infer_head_layers()),
         "head_kernel_size": int(_infer_kernel_size()),
@@ -119,4 +123,5 @@ def infer_head_config_from_state_dict(
         "head_transformer_layers": int(inferred_transformer_layers),
         "head_transformer_heads": 4,
         "num_classes": int(_infer_num_classes()),
+        "head_linear": bool(head_linear),
     }

@@ -609,11 +609,13 @@ def main():
         head_transformer_layers=args.head_transformer_layers,
         head_transformer_heads=args.head_transformer_heads,
         head_transformer_dropout=args.head_transformer_dropout,
+        head_linear=bool(args.head_linear),
         head_blank_idx=head_blank_idx,
         head_output_activation=args.head_output_activation,
         head_output_scale=args.head_output_scale,
         head_crf_blank_score=float(args.ctc_crf_blank_score),
         head_crf_n_base=n_base,
+        head_crf_state_len=int(args.ctc_crf_state_len),
     ).to(device)
 
     model = base_model
