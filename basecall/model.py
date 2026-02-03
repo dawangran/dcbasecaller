@@ -105,6 +105,8 @@ class BasecallHead(nn.Module):
         if crf_blank_score is not None and crf_expand_blanks:
             if crf_n_base is None or crf_n_base <= 0:
                 raise ValueError("crf_n_base must be set when expanding CRF blanks.")
+            if not x.is_contiguous():
+                x = x.contiguous()
             bsz, t_len, n_scores = x.shape
             if n_scores % crf_n_base != 0:
                 raise ValueError("CRF score dim must be divisible by crf_n_base for blank expansion.")

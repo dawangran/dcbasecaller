@@ -91,6 +91,17 @@ def find_sequence_overlap(prev_seq: str, next_seq: str, max_overlap: int) -> int
     return 0
 
 
+def _infer_crf_expand_blanks(num_classes: int, n_base: int, max_state_len: int = 10) -> bool:
+    if n_base <= 0:
+        return False
+    for state_len in range(1, max_state_len + 1):
+        if num_classes == n_base ** (state_len + 1):
+            return True
+        if num_classes == (n_base + 1) * (n_base ** state_len):
+            return False
+    return False
+
+
 # --------------------------
 # main
 # --------------------------
@@ -146,6 +157,7 @@ def main():
     head_config = infer_head_config_from_state_dict(sd)
     # load model
     n_base = len(ID2BASE) - 1
+    expand_blanks = _infer_crf_expand_blanks(head_config["num_classes"], n_base)
     model = BasecallModel(
         model_path=args.model_name_or_path,
         num_classes=head_config["num_classes"],
@@ -160,6 +172,7 @@ def main():
         head_output_scale=args.head_output_scale,
         head_crf_blank_score=float(args.koi_blank_score),
         head_crf_n_base=n_base,
+        head_crf_expand_blanks=expand_blanks,
     ).to(device)
     model.load_state_dict(sd, strict=False)
     model.eval()

@@ -194,6 +194,17 @@ def _parse_path_list(value: str | None) -> List[str]:
     return [x.strip() for x in value.split(",") if x.strip()]
 
 
+def _infer_crf_expand_blanks(num_classes: int, n_base: int, max_state_len: int = 10) -> bool:
+    if n_base <= 0:
+        return False
+    for state_len in range(1, max_state_len + 1):
+        if num_classes == n_base ** (state_len + 1):
+            return True
+        if num_classes == (n_base + 1) * (n_base ** state_len):
+            return False
+    return False
+
+
 @torch.no_grad()
 def main() -> None:
     ap = argparse.ArgumentParser()
@@ -258,6 +269,7 @@ def main() -> None:
     state_dict = load_checkpoint_state(args.ckpt)
     head_config = infer_head_config_from_state_dict(state_dict)
     n_base = len(ID2BASE) - 1
+    expand_blanks = _infer_crf_expand_blanks(head_config["num_classes"], n_base)
     model = BasecallModel(
         model_path=args.model_name_or_path,
         num_classes=head_config["num_classes"],
@@ -272,6 +284,7 @@ def main() -> None:
         head_output_scale=args.head_output_scale,
         head_crf_blank_score=float(args.koi_blank_score),
         head_crf_n_base=n_base,
+        head_crf_expand_blanks=expand_blanks,
     ).to(device)
     model.load_state_dict(state_dict, strict=False)
     model.eval()
