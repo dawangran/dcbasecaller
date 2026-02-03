@@ -59,64 +59,19 @@ def resolve_input_lengths(
 
 def infer_head_config_from_state_dict(
     state_dict: Dict[str, torch.Tensor],
-    default_layers: int = 2,
-    default_kernel: int = 5,
-    default_use_pointwise: bool = True,
     default_num_classes: int | None = None,
 ) -> Dict[str, Any]:
     if default_num_classes is None:
         default_num_classes = len(ID2BASE)
 
-    def _infer_head_layers() -> int:
-        indices = set()
-        for key in state_dict.keys():
-            if key.startswith("base_head.blocks."):
-                parts = key.split(".")
-                if len(parts) > 2 and parts[2].isdigit():
-                    indices.add(int(parts[2]))
-        if not indices:
-            return 0
-        return max(indices) + 1
-
-    def _infer_kernel_size() -> int:
-        weight = state_dict.get("base_head.blocks.0.0.weight")
-        if isinstance(weight, torch.Tensor) and weight.dim() == 3:
-            return int(weight.shape[-1])
-        return default_kernel
-
-    def _infer_use_pointwise() -> bool:
-        if not any(key.startswith("base_head.blocks.") for key in state_dict.keys()):
-            return False
-        if "base_head.blocks.0.1.weight" in state_dict:
-            return True
-        if any(key.startswith("base_head.blocks.") and ".1.weight" in key for key in state_dict):
-            return True
-        return bool(default_use_pointwise)
-
     def _infer_num_classes() -> int:
         weight = state_dict.get("base_head.proj.weight")
         if isinstance(weight, torch.Tensor) and weight.dim() == 2:
             return int(weight.shape[0])
+        weight = state_dict.get("base_head.linear.weight")
+        if isinstance(weight, torch.Tensor) and weight.dim() == 2:
+            return int(weight.shape[0])
         return int(default_num_classes)
-
-    def _infer_transformer_layers() -> int:
-        indices = set()
-        for key in state_dict.keys():
-            if key.startswith("base_head.transformer.layers."):
-                parts = key.split(".")
-                if len(parts) > 3 and parts[3].isdigit():
-                    indices.add(int(parts[3]))
-        if not indices:
-            return 0
-        return max(indices) + 1
-
-    inferred_transformer_layers = _infer_transformer_layers()
     return {
-        "head_layers": int(_infer_head_layers()),
-        "head_kernel_size": int(_infer_kernel_size()),
-        "head_use_pointwise": bool(_infer_use_pointwise()),
-        "head_use_transformer": inferred_transformer_layers > 0,
-        "head_transformer_layers": int(inferred_transformer_layers),
-        "head_transformer_heads": 4,
         "num_classes": int(_infer_num_classes()),
     }

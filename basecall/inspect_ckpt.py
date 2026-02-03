@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Inspect checkpoint head config and print suggested eval/infer flags.
+Inspect checkpoint head config for the CTC-CRF linear head.
 
 Example:
   python inspect_ckpt.py --ckpt ckpt_best.pt
@@ -35,35 +35,10 @@ def main() -> None:
 
     sd = load_checkpoint_state(args.ckpt)
     head_config = infer_head_config_from_state_dict(sd)
-    head_layers = head_config["head_layers"]
-    head_kernel_size = head_config["head_kernel_size"]
-    head_use_pointwise = head_config["head_use_pointwise"]
-    head_use_transformer = head_config["head_use_transformer"]
-    head_transformer_layers = head_config["head_transformer_layers"]
-
     summary = {
-        "head_layers": head_layers,
-        "head_kernel_size": head_kernel_size,
-        "head_use_pointwise": head_use_pointwise,
-        "head_use_transformer": head_use_transformer,
-        "head_transformer_layers": head_transformer_layers,
+        "num_classes": head_config["num_classes"],
     }
     print(json.dumps(summary, indent=2))
-
-    flags = []
-    if head_layers == 0 and not head_use_transformer:
-        flags.append("--head_linear")
-    else:
-        flags.append(f"--head_layers {head_layers}")
-        flags.append(f"--head_kernel_size {head_kernel_size}")
-        if not head_use_pointwise:
-            flags.append("--head_disable_pointwise")
-        if head_use_transformer:
-            flags.append("--head_use_transformer")
-            flags.append(f"--head_transformer_layers {head_transformer_layers}")
-
-    print("\nSuggested flags:")
-    print(" ".join(flags))
 
 
 if __name__ == "__main__":

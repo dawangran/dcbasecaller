@@ -24,20 +24,19 @@ import argparse
 import matplotlib.pyplot as plt
 import logging
 from typing import Tuple, Optional, Any, Dict
+import numpy as np
 
 import torch
-import torch.nn as nn
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from tqdm.auto import tqdm
 
-from .utils import seed_everything, BLANK_IDX, resolve_input_lengths
+from .utils import seed_everything, BLANK_IDX, ID2BASE, resolve_input_lengths
 from .model import BasecallModel
 from .metrics import (
-    ctc_greedy_decode,
-    ctc_decode,
+    koi_beam_search_decode,
     batch_bonito_accuracy,
     plot_curves,
     save_metrics_csv,
@@ -248,10 +247,17 @@ def load_checkpoint(path: str,
 
 # -------------------- train/eval --------------------
 
-def train_one_epoch(model, ctc_loss, data_loader, optimizer, scheduler,
-                    device, rank: int, log_interval: int, use_wandb: bool,
-                    aux_blank_weight: float, loss_type: str,
-                    ctc_crf_blank_score: float | None):
+def train_one_epoch(
+    model,
+    data_loader,
+    optimizer,
+    scheduler,
+    device,
+    rank: int,
+    log_interval: int,
+    use_wandb: bool,
+    ctc_crf_blank_score: float,
+):
     model.train()
     total_loss, n_batches = 0.0, 0
 
@@ -279,21 +285,15 @@ def train_one_epoch(model, ctc_loss, data_loader, optimizer, scheduler,
         # logits_btc = model(input_ids)              # [B,T,C]
         logits_tbc = logits_btc.transpose(0, 1)    # [T,B,C]
 
-        if loss_type == "ctc-crf":
-            loss = ctc_crf_loss(
-                logits_tbc,
-                target_labels,
-                input_lengths,
-                target_lengths,
-                blank_idx=BLANK_IDX,
-                pad_blank=ctc_crf_blank_score is not None,
-                blank_score=float(ctc_crf_blank_score or 0.0),
-            )
-        else:
-            loss = ctc_loss(logits_tbc.log_softmax(2), target_labels, input_lengths, target_lengths)
-        if aux_blank_weight > 0:
-            blank_prob = torch.softmax(logits_btc, dim=-1)[..., BLANK_IDX].mean()
-            loss = loss + aux_blank_weight * blank_prob
+        loss = ctc_crf_loss(
+            logits_tbc,
+            target_labels,
+            input_lengths,
+            target_lengths,
+            blank_idx=BLANK_IDX,
+            pad_blank=False,
+            blank_score=float(ctc_crf_blank_score),
+        )
         if torch.isfinite(loss):
             loss.backward()
             optimizer.step()
@@ -316,12 +316,21 @@ def train_one_epoch(model, ctc_loss, data_loader, optimizer, scheduler,
 
 
 @torch.no_grad()
-def eval_one_epoch(model, ctc_loss, data_loader, device, rank: int, split_name: str, loss_type: str,
-                   ctc_crf_blank_score: float | None,
-                   acc_balanced: bool, acc_min_coverage: float):
+def eval_one_epoch(
+    model,
+    data_loader,
+    device,
+    rank: int,
+    split_name: str,
+    ctc_crf_blank_score: float,
+    acc_balanced: bool,
+    acc_min_coverage: float,
+) -> Tuple[float, float, float, float]:
     model.eval()
     total_loss, n_batches = 0.0, 0
     total_acc, n_acc = 0.0, 0
+    total_cov, n_cov = 0.0, 0
+    blank_probs: List[float] = []
 
     it = tqdm(data_loader, total=len(data_loader),
               disable=not is_main_process(rank), desc=f"[{split_name}]")
@@ -344,28 +353,24 @@ def eval_one_epoch(model, ctc_loss, data_loader, device, rank: int, split_name: 
         # logits_btc = model(input_ids)              # [B,T,C]
         logits_tbc = logits_btc.transpose(0, 1)    # [T,B,C]
 
-        if loss_type == "ctc-crf":
-            loss = ctc_crf_loss(
-                logits_tbc,
-                target_labels,
-                input_lengths,
-                target_lengths,
-                blank_idx=BLANK_IDX,
-                pad_blank=ctc_crf_blank_score is not None,
-                blank_score=float(ctc_crf_blank_score or 0.0),
-            )
-        else:
-            loss = ctc_loss(logits_tbc.log_softmax(2), target_labels, input_lengths, target_lengths)
+        loss = ctc_crf_loss(
+            logits_tbc,
+            target_labels,
+            input_lengths,
+            target_lengths,
+            blank_idx=BLANK_IDX,
+            pad_blank=False,
+            blank_score=float(ctc_crf_blank_score),
+        )
         total_loss += float(loss.item())
         n_batches += 1
+        blank_prob = torch.softmax(logits_btc, dim=-1)[..., BLANK_IDX].mean().item()
+        blank_probs.append(blank_prob)
 
-        pred_seqs = ctc_decode(
+        pred_seqs = koi_beam_search_decode(
             logits_tbc,
-            decoder="crf" if loss_type == "ctc-crf" else "greedy",
-            blank_idx=BLANK_IDX,
+            blank_score=float(ctc_crf_blank_score),
             input_lengths=input_lengths,
-            ctc_crf_pad_blank=ctc_crf_blank_score is not None,
-            ctc_crf_blank_score=float(ctc_crf_blank_score or 0.0),
         )
         acc = batch_bonito_accuracy(
             pred_seqs,
@@ -375,13 +380,21 @@ def eval_one_epoch(model, ctc_loss, data_loader, device, rank: int, split_name: 
         )
         total_acc += float(acc)
         n_acc += 1
+        for p_ids, r_ids in zip(pred_seqs, batch["target_seqs"]):
+            ref_len = max(len(r_ids), 1)
+            total_cov += len(p_ids) / ref_len
+            n_cov += 1
 
     avg_loss = total_loss / max(n_batches, 1)
     avg_acc = total_acc / max(n_acc, 1)
+    avg_cov = total_cov / max(n_cov, 1)
+    avg_blank = float(np.mean(blank_probs)) if blank_probs else 0.0
 
     avg_loss = float(reduce_mean(torch.tensor(avg_loss, device=device)).item())
     avg_acc = float(reduce_mean(torch.tensor(avg_acc, device=device)).item())
-    return avg_loss, avg_acc
+    avg_cov = float(reduce_mean(torch.tensor(avg_cov, device=device)).item())
+    avg_blank = float(reduce_mean(torch.tensor(avg_blank, device=device)).item())
+    return avg_loss, avg_acc, avg_cov, avg_blank
 
 
 # -------------------- pretrained loader (keep) --------------------
@@ -510,6 +523,8 @@ def parse_args():
                    help="Save ckpt_best.pt based on best val_acc (default off unless provided).")
     p.add_argument("--freeze_backbone", action="store_true",
                    help="Freeze backbone parameters; train only base_head.")
+    p.add_argument("--reset_backbone_weights", action="store_true",
+                   help="Reinitialize backbone weights for ablation (ignores pretrained backbone init).")
     p.add_argument("--unfreeze_last_n_layers", type=int, default=0,
                    help="Unfreeze only the last N backbone layers (default: 0).")
     p.add_argument("--unfreeze_layer_start", type=int, default=None,
@@ -517,34 +532,19 @@ def parse_args():
     p.add_argument("--unfreeze_layer_end", type=int, default=None,
                    help="Unfreeze backbone layers in [start, end). Optional finer control.")
 
-    p.add_argument("--head_kernel_size", type=int, default=5)
-    p.add_argument("--head_layers", type=int, default=2)
-    p.add_argument("--head_dropout", type=float, default=0.1)
-    p.add_argument("--head_disable_pointwise", action="store_true",
-                   help="Disable pointwise conv in head (default: enabled).")
-    p.add_argument("--head_use_transformer", action="store_true")
-    p.add_argument("--head_transformer_layers", type=int, default=1)
-    p.add_argument("--head_transformer_heads", type=int, default=4)
-    p.add_argument("--head_transformer_dropout", type=float, default=0.1)
     p.add_argument("--head_output_activation", choices=["tanh", "relu"], default=None,
                    help="Optional activation applied to head output logits.")
     p.add_argument("--head_output_scale", type=float, default=None,
                    help="Optional scalar applied to head output logits (after activation).")
-    p.add_argument("--head_linear", action="store_true",
-                   help="Use a pure linear head (disable conv/transformer head blocks).")
 
-    p.add_argument("--aux_blank_weight", type=float, default=0.0,
-                   help="Optional auxiliary loss weight to penalize blank-dominated frames.")
-    p.add_argument("--loss_type", choices=["ctc", "ctc-crf"], default="ctc",
-                   help="Training loss type. Use ctc-crf only if a compatible ctc_crf library is installed.")
     p.add_argument("--acc_balanced", action="store_true",
                    help="Use Bonito balanced accuracy: (match - ins) / (match + mismatch + del).")
     p.add_argument("--acc_min_coverage", type=float, default=0.0,
                    help="Minimum reference coverage required to count a read for accuracy.")
     p.add_argument("--ctc_crf_state_len", type=int, default=5,
                    help="State length for Bonito CTC-CRF (used to set output classes).")
-    p.add_argument("--ctc_crf_blank_score", type=float, default=None,
-                   help="If set, overwrite CTC-CRF blank scores with this fixed value (disables blank training).")
+    p.add_argument("--ctc_crf_blank_score", type=float, default=2.0,
+                   help="Fixed blank score for CTC-CRF (blank is not trained).")
 
 
     return p.parse_args()
@@ -565,40 +565,28 @@ def main():
         logger.info(f"[Args] {vars(args)}")
 
     # ---- model (先建模型拿 tokenizer，保持原数据逻辑) ----
-    num_classes = None
-    head_blank_idx = 0
-    if args.loss_type == "ctc-crf":
-        import os as _os
-        from . import ctc_crf as crf_backend
-
-        _os.environ["CTC_CRF_STATE_LEN"] = str(args.ctc_crf_state_len)
-        num_classes = crf_backend.crf_num_classes(args.ctc_crf_state_len)
-        head_blank_idx = None
-
-    if args.head_linear:
-        args.head_layers = 0
-        args.head_use_transformer = False
-        args.head_disable_pointwise = True
+    import os as _os
+    _os.environ["CTC_CRF_STATE_LEN"] = str(args.ctc_crf_state_len)
+    n_base = len(ID2BASE) - 1
+    if n_base <= 0:
+        raise ValueError("CTC-CRF alphabet must include at least one non-blank base.")
+    # CTC-CRF head emits full (blank+base) scores; blank score is overwritten during forward.
+    num_classes = (n_base ** args.ctc_crf_state_len) * (n_base + 1)
 
     base_model = BasecallModel(
         model_path=args.model_name_or_path,
         num_classes=num_classes if num_classes is not None else None,
         hidden_layer=args.hidden_layer,
         freeze_backbone=bool(args.freeze_backbone),
+        reset_backbone_weights=bool(args.reset_backbone_weights),
         unfreeze_last_n_layers=args.unfreeze_last_n_layers,
         unfreeze_layer_start=args.unfreeze_layer_start,
         unfreeze_layer_end=args.unfreeze_layer_end,
-        head_kernel_size=args.head_kernel_size,
-        head_layers=args.head_layers,
-        head_dropout=args.head_dropout,
-        head_use_pointwise=not bool(args.head_disable_pointwise),
-        head_use_transformer=bool(args.head_use_transformer),
-        head_transformer_layers=args.head_transformer_layers,
-        head_transformer_heads=args.head_transformer_heads,
-        head_transformer_dropout=args.head_transformer_dropout,
-        head_blank_idx=head_blank_idx,
         head_output_activation=args.head_output_activation,
         head_output_scale=args.head_output_scale,
+        head_crf_blank_score=float(args.ctc_crf_blank_score),
+        head_crf_n_base=n_base,
+        head_crf_state_len=int(args.ctc_crf_state_len),
     ).to(device)
 
     model = base_model
@@ -727,8 +715,6 @@ def main():
         logger.info(f"[Scheduler] steps_per_epoch={steps_per_epoch} total_steps={total_steps} "
                     f"warmup_steps={warmup_steps} scheduler={sched_name}")
 
-    ctc_loss = nn.CTCLoss(blank=BLANK_IDX, reduction="mean", zero_infinity=True)
-
     # ---- optional pretrained weights (only if NOT resuming) ----
     if args.pretrained_ckpt and not args.resume_ckpt:
         load_pretrained_weights(
@@ -779,7 +765,6 @@ def main():
 
         tr_loss = train_one_epoch(
             model,
-            ctc_loss,
             train_loader,
             optimizer,
             scheduler,
@@ -787,8 +772,6 @@ def main():
             rank,
             args.log_interval,
             use_wandb,
-            args.aux_blank_weight,
-            args.loss_type,
             args.ctc_crf_blank_score,
         )
         train_losses.append(tr_loss)
@@ -800,14 +783,12 @@ def main():
         if val_loader is not None:
             if val_sampler is not None:
                 val_sampler.set_epoch(epoch)
-            val_loss, val_acc = eval_one_epoch(
+            val_loss, val_acc, val_cov, val_blank = eval_one_epoch(
                 model,
-                ctc_loss,
                 val_loader,
                 device,
                 rank,
                 "val",
-                args.loss_type,
                 args.ctc_crf_blank_score,
                 args.acc_balanced,
                 args.acc_min_coverage,
@@ -816,9 +797,20 @@ def main():
             val_accs.append(val_acc)
 
             if is_main_process(rank):
-                logger.info(f"[Val] epoch={epoch} loss={val_loss:.4f} acc={val_acc:.4f}")
+                logger.info(
+                    f"[Val] epoch={epoch} loss={val_loss:.4f} acc={val_acc:.4f} "
+                    f"coverage={val_cov:.4f} blank={val_blank:.4f}"
+                )
                 if use_wandb and wandb is not None:
-                    wandb.log({"val/loss": float(val_loss), "val/acc": float(val_acc), "epoch": epoch})
+                    wandb.log(
+                        {
+                            "val/loss": float(val_loss),
+                            "val/acc": float(val_acc),
+                            "val/coverage": float(val_cov),
+                            "val/blank": float(val_blank),
+                            "epoch": epoch,
+                        }
+                    )
 
         # ---- checkpoint save ----
         if is_main_process(rank) and (epoch % max(args.save_every, 1) == 0):
@@ -854,22 +846,30 @@ def main():
 
     # ---- test ----
     if test_loader is not None:
-        test_loss, test_acc = eval_one_epoch(
+        test_loss, test_acc, test_cov, test_blank = eval_one_epoch(
             model,
-            ctc_loss,
             test_loader,
             device,
             rank,
             "test",
-            args.loss_type,
             args.ctc_crf_blank_score,
             args.acc_balanced,
             args.acc_min_coverage,
         )
         if is_main_process(rank):
-            logger.info(f"[Test] loss={test_loss:.4f} acc={test_acc:.4f}")
+            logger.info(
+                f"[Test] loss={test_loss:.4f} acc={test_acc:.4f} "
+                f"coverage={test_cov:.4f} blank={test_blank:.4f}"
+            )
             if use_wandb and wandb is not None:
-                wandb.log({"test/loss": float(test_loss), "test/acc": float(test_acc)})
+                wandb.log(
+                    {
+                        "test/loss": float(test_loss),
+                        "test/acc": float(test_acc),
+                        "test/coverage": float(test_cov),
+                        "test/blank": float(test_blank),
+                    }
+                )
 
     # ---- final save curves/csv ----
     if is_main_process(rank):
@@ -897,7 +897,11 @@ def main():
                 attention_mask=attention_mask,
                 input_lengths=batch.get("input_lengths"),
             )
-            pred_seqs = ctc_greedy_decode(logits_tbc, blank_idx=BLANK_IDX, input_lengths=input_lengths)
+            pred_seqs = koi_beam_search_decode(
+                logits_tbc,
+                blank_score=float(args.ctc_crf_blank_score),
+                input_lengths=input_lengths,
+            )
             ref_seqs = batch["target_seqs"]
             fig = plot_alignment_heatmap(pred_seqs, ref_seqs, max_reads=32, max_len=80)
             wandb.log({"final/base_alignment": wandb.Image(fig)})

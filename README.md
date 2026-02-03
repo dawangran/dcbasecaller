@@ -110,27 +110,19 @@ basecall-train \
 - `--model_name_or_path`: HuggingFace model ID or local path.
 - `--hidden-layer`: which hidden layer to use (`-1` = last, `-2` = second last).
 - `--freeze_backbone`: freeze backbone, train head only.
+- `--reset_backbone_weights`: reinitialize backbone weights for ablation.
 - `--unfreeze_last_n_layers`: unfreeze last N transformer layers.
 - `--unfreeze_layer_start`, `--unfreeze_layer_end`: unfreeze layers in range `[start, end)`.
 
 **Head options**
-- `--head_kernel_size`: kernel size for depthwise conv.
-- `--head_layers`: number of depthwise residual blocks.
-- `--head_dropout`: dropout for head.
-- `--head_disable_pointwise`: disable pointwise conv (default is enabled).
-- `--head_use_transformer`: add transformer layers in head.
-- `--head_transformer_layers`, `--head_transformer_heads`, `--head_transformer_dropout`.
-- `--head_linear`: use a pure linear head (sets `head_layers=0`, disables pointwise/transformer blocks; uses LayerNorm + Linear only).
 - `--head_output_activation`: optional activation for head logits (e.g. `tanh` for Bonito-style scaling).
 - `--head_output_scale`: optional scalar multiplier for head logits (applied after activation).
 
 
 **Optimization**
 - `--batch_size`, `--num_epochs`, `--lr`, `--weight_decay`, `--warmup_ratio`, `--min_lr`.
-- `--aux_blank_weight`: optional penalty to discourage blank-dominated outputs.
-- `--loss_type`: `ctc` (default) or `ctc-crf` (requires k2 or ont-koi + `ctc_crf.py` adapter).
 - `--ctc_crf_state_len`: Bonito CTC-CRF state length (controls CRF head output classes).
-- `--ctc_crf_blank_score`: if set, overwrite blank scores with this fixed value (disables blank training).
+- `--ctc_crf_blank_score`: fixed blank score for CTC-CRF (blank is not trained).
 - `--acc_balanced`: use Bonito balanced accuracy for validation/checkpointing.
 - `--acc_min_coverage`: minimum reference coverage required to count a read for accuracy.
 
@@ -158,7 +150,7 @@ basecall-eval \
   --jsonl_paths /path/to/reads.jsonl.gz,/path/to/more_jsonl \
   --model_name_or_path <hf-model> \
   --ckpt ckpt_best.pt \
-  --decoder greedy \
+  --beam_width 32 \
   --batch_size 8 \
   --out_dir eval_out \
   --num_visualize 100 \
@@ -174,7 +166,7 @@ basecall-eval \
   --npy_paths /path/to/reads_or_dir \
   --model_name_or_path <hf-model> \
   --ckpt ckpt_best.pt \
-  --decoder greedy \
+  --beam_width 32 \
   --batch_size 8 \
   --out_dir eval_out
 ```
@@ -185,8 +177,7 @@ basecall-eval \
 - `--npy_paths`: comma-separated folders or `tokens_*.npy`/`reference_*.npy` files (uses token/reference pairs).
 - `--model_name_or_path`: HuggingFace model ID or local path.
 - `--ckpt`: checkpoint path.
-- `--decoder`: `greedy`, `beam`, `beam_search`, or `crf` (crf requires ont-koi + `ctc_crf.py` adapter).
-- `--beam_width`: beam width for `beam` decoder.
+- `--beam_width`: beam width for ont-koi `beam_search`.
 - `--koi_beam_cut`, `--koi_scale`, `--koi_offset`, `--koi_blank_score`, `--koi_reverse`: parameters for the Koi `beam_search` decoder.
 - `--acc_balanced`: use Bonito balanced accuracy in metrics.
 - `--acc_min_coverage`: minimum reference coverage required to count a read for accuracy.
@@ -214,18 +205,11 @@ basecall-infer \
   --jsonl_gz /path/to/reads.jsonl.gz \
   --model_name_or_path <hf-model> \
   --ckpt ckpt_best.pt \
-  --decoder greedy \
+  --beam_width 32 \
   --out outputs/preds.fastq
 ```
 
-### Inference decoders
-
-- `greedy`: Bonito-style greedy decoding with per-base Q scores.
-- `beam`: CPU CTC beam search (simple N-best beam).
-- `beam_search`: Koi/ont-koi beam search with score scaling controls.
-- `crf`: Bonito CTC-CRF Viterbi decoding (requires ont-koi).
-
-### Decoder parameters (for `beam_search`)
+### Decoder parameters (ont-koi `beam_search`)
 
 - `--koi_beam_cut`: beam cut value (default: 100.0).
 - `--koi_scale`: scale applied to scores (default: 1.0).
@@ -235,9 +219,8 @@ basecall-infer \
 
 ### Notes for Bonito-style CTC-CRF training/inference
 
-- Use `--loss_type ctc-crf` with `--ctc_crf_state_len` during training to match the CTC-CRF head size.
-- If you set `--ctc_crf_blank_score`, keep it on for evaluation/inference so the blank score is fixed consistently.
-- When `--ctc_crf_blank_score` is set, you must use `--decoder crf` (CTC/Koi decoders expect full logits).
+- Set `--ctc_crf_state_len` during training to match the CTC-CRF head size.
+- `--ctc_crf_blank_score` fixes the blank score (blank is not trained) and should stay consistent for decoding.
 - For Bonito-style logit scaling, use `--head_output_activation tanh` and `--head_output_scale 5` so scores match the expected range.
 
 ### All inference arguments
@@ -249,19 +232,17 @@ basecall-infer \
 - `--device`, `--amp`.
 - `--max_tokens`: maximum token count per chunk when splitting long inputs.
 - `--overlap`: overlap token count between chunks.
-- `--overlap_bases`: optional max overlap (bases) for sequence-based trimming.
 - `--batch_size`: number of reads per inference batch.
 - `--hidden_layer`: which backbone hidden state to use (default: -1).
 
 **Decoding**
-- `--decoder`: `greedy`, `beam`, `beam_search`, or `crf` (crf requires ont-koi + `ctc_crf.py` adapter).
 - `--beam_width`: beam search width.
-- `--beam_q`: fixed Q score for non-greedy output.
+- `--beam_q`: fixed Q score for output FASTQ.
 - `--koi_beam_cut`, `--koi_scale`, `--koi_offset`, `--koi_blank_score`, `--koi_reverse`: Koi beam-search parameters.
 
 **Chunking**
 - Long `text` fields are split into token chunks, decoded independently, then concatenated.
-- Overlap trimming is sequence-based: the suffix of the previous chunk output is matched against the prefix of the next chunk output, up to `overlap_bases` (or a proportional estimate from `--overlap`).
+- Overlap trimming follows chunk boundaries: each chunk keeps the non-overlap core based on `--max_tokens` and `--overlap`.
 
 ---
 
@@ -293,8 +274,7 @@ basecall-train \
 basecall-eval \
   --jsonl_paths /path/to/data \
   --model_name_or_path <hf-model> \
-  --ckpt outputs/ckpt_last.pt \
-  --decoder greedy
+  --ckpt outputs/ckpt_last.pt
 
 # 3) Infer (JSONL -> fastq)
 basecall-infer \
