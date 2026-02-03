@@ -73,6 +73,9 @@ class BasecallHead(nn.Module):
             self.output_scale = None
         else:
             self.register_buffer("output_scale", torch.tensor(float(output_scale)))
+        self.crf_blank_score = crf_blank_score
+        self.crf_n_base = crf_n_base
+        self.crf_expand_blanks = crf_expand_blanks
 
         # discourage "all-blank" early collapse
         if self.proj.bias is not None and blank_idx is not None and 0 <= blank_idx < num_classes:
@@ -102,18 +105,18 @@ class BasecallHead(nn.Module):
                 raise ValueError(f"Unknown output_activation: {self.output_activation}")
         if self.output_scale is not None:
             x = x * self.output_scale
-        if crf_blank_score is not None and crf_expand_blanks:
-            if crf_n_base is None or crf_n_base <= 0:
+        if self.crf_blank_score is not None and self.crf_expand_blanks:
+            if self.crf_n_base is None or self.crf_n_base <= 0:
                 raise ValueError("crf_n_base must be set when expanding CRF blanks.")
             if not x.is_contiguous():
                 x = x.contiguous()
             bsz, t_len, n_scores = x.shape
-            if n_scores % crf_n_base != 0:
+            if n_scores % self.crf_n_base != 0:
                 raise ValueError("CRF score dim must be divisible by crf_n_base for blank expansion.")
             x = F.pad(
-                x.view(bsz, t_len, n_scores // crf_n_base, crf_n_base),
+                x.view(bsz, t_len, n_scores // self.crf_n_base, self.crf_n_base),
                 (1, 0),
-                value=float(crf_blank_score),
+                value=float(self.crf_blank_score),
             ).view(bsz, t_len, -1)
         return x
 
