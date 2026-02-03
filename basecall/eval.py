@@ -10,7 +10,7 @@ Example:
     --jsonl_paths /path/to/reads.jsonl.gz \
     --model_name_or_path your_hf_model \
     --ckpt ckpt_best.pt \
-    --decoder greedy \
+    --beam_width 32 \
     --batch_size 8 \
     --out_dir eval_out \
     --num_visualize 8 \
@@ -37,9 +37,9 @@ from .data_multifolder import (
     MultiNpySignalRefDataset,
     create_collate_fn,
 )
-from .metrics import ctc_decode, batch_bonito_accuracy, cal_bonito_accuracy
+from .metrics import koi_beam_search_decode, batch_bonito_accuracy, cal_bonito_accuracy
 from .model import BasecallModel
-from .utils import BLANK_IDX, ID2BASE, seed_everything, infer_head_config_from_state_dict, resolve_input_lengths
+from .utils import ID2BASE, seed_everything, infer_head_config_from_state_dict, resolve_input_lengths
 from .callback import plot_alignment_heatmap, plot_aligned_heatmap_png, align_sequences_indel_aware
 
 
@@ -205,8 +205,7 @@ def main() -> None:
                     help="Scan subfolders for .jsonl.gz or tokens/reference .npy inputs.")
     ap.add_argument("--model_name_or_path", required=True)
     ap.add_argument("--ckpt", required=True)
-    ap.add_argument("--decoder", choices=["greedy", "beam", "beam_search", "crf"], default="greedy")
-    ap.add_argument("--beam_width", type=int, default=5)
+    ap.add_argument("--beam_width", type=int, default=32)
     ap.add_argument("--koi_beam_cut", type=float, default=100.0,
                     help="Beam cut value for Koi beam_search decoding.")
     ap.add_argument("--koi_scale", type=float, default=1.0,
@@ -229,10 +228,6 @@ def main() -> None:
                     help="Optional activation applied to head output logits.")
     ap.add_argument("--head_output_scale", type=float, default=None,
                     help="Optional scalar applied to head output logits (after activation).")
-    ap.add_argument("--ctc_crf_state_len", type=int, default=5,
-                    help="State length for Bonito CTC-CRF (used for CRF decoder).")
-    ap.add_argument("--ctc_crf_blank_score", type=float, default=None,
-                    help="If set, overwrite CTC-CRF blank scores with this fixed value (disables blank training).")
     ap.add_argument("--acc_balanced", action="store_true",
                     help="Use Bonito balanced accuracy: (match - ins) / (match + mismatch + del).")
     ap.add_argument("--acc_min_coverage", type=float, default=0.0,
@@ -242,14 +237,6 @@ def main() -> None:
     seed_everything(42)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     use_amp = device.type == "cuda"
-    if args.ctc_crf_blank_score is not None and args.decoder != "crf":
-        raise ValueError(
-            "ctc_crf_blank_score set: use --decoder crf or unset the fixed blank score "
-            "for CTC/Koi decoders."
-        )
-    if args.decoder == "crf":
-        os.environ["CTC_CRF_STATE_LEN"] = str(args.ctc_crf_state_len)
-
     if args.jsonl_paths and args.npy_paths:
         raise ValueError("Do not mix jsonl inputs with tokens/reference npy inputs in the same run.")
 
@@ -328,19 +315,15 @@ def main() -> None:
             attention_mask=attention_mask,
             input_lengths=batch.get("input_lengths"),
         )
-        pred_ids = ctc_decode(
+        pred_ids = koi_beam_search_decode(
             logits_tbc,
-            decoder=args.decoder,
             beam_width=args.beam_width,
-            blank_idx=BLANK_IDX,
+            beam_cut=args.koi_beam_cut,
+            scale=args.koi_scale,
+            offset=args.koi_offset,
+            blank_score=args.koi_blank_score,
+            reverse=args.koi_reverse,
             input_lengths=input_lengths,
-            ctc_crf_pad_blank=args.ctc_crf_blank_score is not None,
-            ctc_crf_blank_score=float(args.ctc_crf_blank_score or 0.0),
-            koi_beam_cut=args.koi_beam_cut,
-            koi_scale=args.koi_scale,
-            koi_offset=args.koi_offset,
-            koi_blank_score=args.koi_blank_score,
-            koi_reverse=args.koi_reverse,
         )
         ref_ids = batch["target_seqs"]
 

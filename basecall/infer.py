@@ -10,7 +10,6 @@
 import argparse
 import json
 import os
-import math
 import gzip
 from typing import List, Tuple, Iterable
 
@@ -18,20 +17,8 @@ import torch
 from tqdm import tqdm
 
 from .model import BasecallModel
-from .utils import ID2BASE, BLANK_IDX, seed_everything, resolve_input_lengths, infer_head_config_from_state_dict
-from .metrics import ctc_decode
-
-# --------------------------
-# Bonito-style Q-score (CTC)
-# --------------------------
-
-def _prob_to_phred(p: float, max_q: int = 40) -> int:
-    """
-    Bonito/Guppy 常用：Q = -10 log10(1 - p)
-    """
-    p = min(max(p, 1e-6), 1 - 1e-6)
-    q = -10.0 * math.log10(1.0 - p)
-    return int(min(max_q, max(0, round(q))))
+from .utils import ID2BASE, seed_everything, resolve_input_lengths, infer_head_config_from_state_dict
+from .metrics import koi_beam_search_decode
 
 def _phred_to_char(q: int) -> str:
     # standard Sanger FASTQ (Phred+33)
@@ -41,86 +28,6 @@ def _phred_to_char(q: int) -> str:
 
 def _constant_qstring(length: int, q: int) -> str:
     return _phred_to_char(q) * max(length, 0)
-
-def ctc_greedy_with_q_bonito(
-    logits_btc: torch.Tensor,
-    blank_idx: int = 0,
-    input_length: int | None = None,
-) -> Tuple[str, str]:
-    """
-    logits_btc: [1, T, C]（单条 read）
-    返回：(sequence, qstring)
-    Bonito-style 近似做法：
-      - timestep 级 argmax 得到 viterbi path
-      - collapse repeats & remove blanks
-      - 每个 base 的置信度用该 base run 内的概率做“几何平均”（更接近 Bonito 的稳定感）
-      - Q = -10 log10(1-p)
-    """
-    assert logits_btc.dim() == 3 and logits_btc.shape[0] == 1
-    probs = torch.softmax(logits_btc[0], dim=-1)  # [T, C]
-    if input_length is not None:
-        input_length = min(int(input_length), probs.size(0))
-        if input_length <= 0:
-            return "", ""
-        probs = probs[:input_length]
-
-    # viterbi path
-    path = torch.argmax(probs, dim=-1).tolist()  # [T]
-    path_p = probs[torch.arange(probs.shape[0]), torch.tensor(path, device=probs.device)].tolist()  # [T]
-
-    seq_ids: List[int] = []
-    base_ps: List[float] = []
-
-    prev = None
-    cur_label = None
-    cur_run_ps: List[float] = []
-
-    def flush_run(label: int, run_ps: List[float]):
-        if label == blank_idx:
-            return
-        # collapse rule: label != prev_label_already_handled outside
-        # geometric mean prob (Bonito-like稳定)
-        run_ps = [min(max(p, 1e-8), 1.0) for p in run_ps]
-        gm = math.exp(sum(math.log(p) for p in run_ps) / len(run_ps))
-        seq_ids.append(label)
-        base_ps.append(gm)
-
-    for lab, p in zip(path, path_p):
-        if prev is None:
-            prev = lab
-            cur_label = lab
-            cur_run_ps = [p]
-            continue
-
-        if lab == cur_label:
-            cur_run_ps.append(p)
-        else:
-            # label changed: consider emitting previous run if non-blank and != previous emitted handled by CTC rule:
-            # CTC greedy collapse: output when label != blank and label != prev_label (prev timestep label)
-            flush_run(cur_label, cur_run_ps)
-            cur_label = lab
-            cur_run_ps = [p]
-        prev = lab
-
-    # last run
-    flush_run(cur_label, cur_run_ps)
-
-    # Remove consecutive duplicates after blank-removal?（标准 greedy collapse 已基本处理）
-    # 这里再保险一下：避免 ... A A ...（如果中间没有 blank，但你想更严格可关掉）
-    collapsed_ids = []
-    collapsed_ps = []
-    for i, lab in enumerate(seq_ids):
-        if i == 0 or lab != collapsed_ids[-1]:
-            collapsed_ids.append(lab)
-            collapsed_ps.append(base_ps[i])
-        else:
-            # 同一base连续：合并概率（取几何平均）
-            merged = math.sqrt(collapsed_ps[-1] * base_ps[i])
-            collapsed_ps[-1] = merged
-
-    bases = "".join(ID2BASE.get(i, "N") for i in collapsed_ids)
-    qstring = "".join(_phred_to_char(_prob_to_phred(p)) for p in collapsed_ps)
-    return bases, qstring
 
 
 def write_fastq(fp, read_id: str, seq: str, q: str):
@@ -197,8 +104,7 @@ def main():
     ap.add_argument("--out", required=True, type=str)
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--amp", action="store_true")
-    ap.add_argument("--decoder", choices=["greedy", "beam", "beam_search", "crf"], default="greedy")
-    ap.add_argument("--beam_width", type=int, default=5)
+    ap.add_argument("--beam_width", type=int, default=32)
     ap.add_argument("--koi_beam_cut", type=float, default=100.0,
                     help="Beam cut value for Koi beam_search decoding.")
     ap.add_argument("--koi_scale", type=float, default=1.0,
@@ -219,23 +125,11 @@ def main():
                     help="Optional activation applied to head output logits.")
     ap.add_argument("--head_output_scale", type=float, default=None,
                     help="Optional scalar applied to head output logits (after activation).")
-    ap.add_argument("--ctc_crf_state_len", type=int, default=5,
-                    help="State length for Bonito CTC-CRF (used for CRF decoder).")
-    ap.add_argument("--ctc_crf_blank_score", type=float, default=None,
-                    help="If set, overwrite CTC-CRF blank scores with this fixed value (disables blank training).")
     args = ap.parse_args()
 
     seed_everything(42)
     device = torch.device(args.device)
     use_amp = args.amp and device.type == "cuda"
-    if args.ctc_crf_blank_score is not None and args.decoder != "crf":
-        raise ValueError(
-            "ctc_crf_blank_score set: use --decoder crf or unset the fixed blank score "
-            "for CTC/Koi decoders."
-        )
-    if args.decoder == "crf":
-        os.environ["CTC_CRF_STATE_LEN"] = str(args.ctc_crf_state_len)
-
     state = torch.load(args.ckpt, map_location="cpu")
     # 兼容 ckpt 格式：{"model": ...} / {"model_state_dict": ...} / {"state_dict": ...} / 直接 state_dict
     if isinstance(state, dict):
@@ -297,36 +191,22 @@ def main():
                 with torch.cuda.amp.autocast(enabled=use_amp):
                     logits_btc = model(input_ids, attention_mask=attention_mask)  # [B,T,C]
 
-                if args.decoder == "greedy":
-                    for idx in range(logits_btc.size(0)):
-                        seq, qstring = ctc_greedy_with_q_bonito(
-                            logits_btc[idx:idx + 1],
-                            blank_idx=BLANK_IDX,
-                            input_length=input_lengths[idx].item(),
-                        )
-                        chunk_seqs.append(seq)
-                        chunk_qs.append(qstring)
-                else:
-                    logits_tbc = logits_btc.transpose(0, 1)
-                    pred_ids = ctc_decode(
-                        logits_tbc,
-                        decoder=args.decoder,
-                        beam_width=args.beam_width,
-                        blank_idx=BLANK_IDX,
-                        input_lengths=input_lengths,
-                        ctc_crf_pad_blank=args.ctc_crf_blank_score is not None,
-                        ctc_crf_blank_score=float(args.ctc_crf_blank_score or 0.0),
-                        koi_beam_cut=args.koi_beam_cut,
-                        koi_scale=args.koi_scale,
-                        koi_offset=args.koi_offset,
-                        koi_blank_score=args.koi_blank_score,
-                        koi_reverse=args.koi_reverse,
-                    )
-                    for ids in pred_ids:
-                        seq = "".join(ID2BASE.get(i, "N") for i in ids)
-                        qstring = _constant_qstring(len(seq), args.beam_q)
-                        chunk_seqs.append(seq)
-                        chunk_qs.append(qstring)
+                logits_tbc = logits_btc.transpose(0, 1)
+                pred_ids = koi_beam_search_decode(
+                    logits_tbc,
+                    beam_width=args.beam_width,
+                    beam_cut=args.koi_beam_cut,
+                    scale=args.koi_scale,
+                    offset=args.koi_offset,
+                    blank_score=args.koi_blank_score,
+                    reverse=args.koi_reverse,
+                    input_lengths=input_lengths,
+                )
+                for ids in pred_ids:
+                    seq = "".join(ID2BASE.get(i, "N") for i in ids)
+                    qstring = _constant_qstring(len(seq), args.beam_q)
+                    chunk_seqs.append(seq)
+                    chunk_qs.append(qstring)
 
             if args.overlap > 0 and chunk_seqs:
                 trimmed_seqs = [chunk_seqs[0]]

@@ -26,7 +26,6 @@ import logging
 from typing import Tuple, Optional, Any, Dict
 
 import torch
-import torch.nn as nn
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
@@ -36,8 +35,7 @@ from tqdm.auto import tqdm
 from .utils import seed_everything, BLANK_IDX, resolve_input_lengths
 from .model import BasecallModel
 from .metrics import (
-    ctc_greedy_decode,
-    ctc_decode,
+    koi_beam_search_decode,
     batch_bonito_accuracy,
     plot_curves,
     save_metrics_csv,
@@ -248,10 +246,17 @@ def load_checkpoint(path: str,
 
 # -------------------- train/eval --------------------
 
-def train_one_epoch(model, ctc_loss, data_loader, optimizer, scheduler,
-                    device, rank: int, log_interval: int, use_wandb: bool,
-                    aux_blank_weight: float, loss_type: str,
-                    ctc_crf_blank_score: float | None):
+def train_one_epoch(
+    model,
+    data_loader,
+    optimizer,
+    scheduler,
+    device,
+    rank: int,
+    log_interval: int,
+    use_wandb: bool,
+    ctc_crf_blank_score: float,
+):
     model.train()
     total_loss, n_batches = 0.0, 0
 
@@ -279,21 +284,15 @@ def train_one_epoch(model, ctc_loss, data_loader, optimizer, scheduler,
         # logits_btc = model(input_ids)              # [B,T,C]
         logits_tbc = logits_btc.transpose(0, 1)    # [T,B,C]
 
-        if loss_type == "ctc-crf":
-            loss = ctc_crf_loss(
-                logits_tbc,
-                target_labels,
-                input_lengths,
-                target_lengths,
-                blank_idx=BLANK_IDX,
-                pad_blank=ctc_crf_blank_score is not None,
-                blank_score=float(ctc_crf_blank_score or 0.0),
-            )
-        else:
-            loss = ctc_loss(logits_tbc.log_softmax(2), target_labels, input_lengths, target_lengths)
-        if aux_blank_weight > 0:
-            blank_prob = torch.softmax(logits_btc, dim=-1)[..., BLANK_IDX].mean()
-            loss = loss + aux_blank_weight * blank_prob
+        loss = ctc_crf_loss(
+            logits_tbc,
+            target_labels,
+            input_lengths,
+            target_lengths,
+            blank_idx=BLANK_IDX,
+            pad_blank=True,
+            blank_score=float(ctc_crf_blank_score),
+        )
         if torch.isfinite(loss):
             loss.backward()
             optimizer.step()
@@ -316,9 +315,16 @@ def train_one_epoch(model, ctc_loss, data_loader, optimizer, scheduler,
 
 
 @torch.no_grad()
-def eval_one_epoch(model, ctc_loss, data_loader, device, rank: int, split_name: str, loss_type: str,
-                   ctc_crf_blank_score: float | None,
-                   acc_balanced: bool, acc_min_coverage: float):
+def eval_one_epoch(
+    model,
+    data_loader,
+    device,
+    rank: int,
+    split_name: str,
+    ctc_crf_blank_score: float,
+    acc_balanced: bool,
+    acc_min_coverage: float,
+):
     model.eval()
     total_loss, n_batches = 0.0, 0
     total_acc, n_acc = 0.0, 0
@@ -344,28 +350,22 @@ def eval_one_epoch(model, ctc_loss, data_loader, device, rank: int, split_name: 
         # logits_btc = model(input_ids)              # [B,T,C]
         logits_tbc = logits_btc.transpose(0, 1)    # [T,B,C]
 
-        if loss_type == "ctc-crf":
-            loss = ctc_crf_loss(
-                logits_tbc,
-                target_labels,
-                input_lengths,
-                target_lengths,
-                blank_idx=BLANK_IDX,
-                pad_blank=ctc_crf_blank_score is not None,
-                blank_score=float(ctc_crf_blank_score or 0.0),
-            )
-        else:
-            loss = ctc_loss(logits_tbc.log_softmax(2), target_labels, input_lengths, target_lengths)
+        loss = ctc_crf_loss(
+            logits_tbc,
+            target_labels,
+            input_lengths,
+            target_lengths,
+            blank_idx=BLANK_IDX,
+            pad_blank=True,
+            blank_score=float(ctc_crf_blank_score),
+        )
         total_loss += float(loss.item())
         n_batches += 1
 
-        pred_seqs = ctc_decode(
+        pred_seqs = koi_beam_search_decode(
             logits_tbc,
-            decoder="crf" if loss_type == "ctc-crf" else "greedy",
-            blank_idx=BLANK_IDX,
+            blank_score=float(ctc_crf_blank_score),
             input_lengths=input_lengths,
-            ctc_crf_pad_blank=ctc_crf_blank_score is not None,
-            ctc_crf_blank_score=float(ctc_crf_blank_score or 0.0),
         )
         acc = batch_bonito_accuracy(
             pred_seqs,
@@ -533,18 +533,14 @@ def parse_args():
     p.add_argument("--head_linear", action="store_true",
                    help="Use a pure linear head (disable conv/transformer head blocks).")
 
-    p.add_argument("--aux_blank_weight", type=float, default=0.0,
-                   help="Optional auxiliary loss weight to penalize blank-dominated frames.")
-    p.add_argument("--loss_type", choices=["ctc", "ctc-crf"], default="ctc",
-                   help="Training loss type. Use ctc-crf only if a compatible ctc_crf library is installed.")
     p.add_argument("--acc_balanced", action="store_true",
                    help="Use Bonito balanced accuracy: (match - ins) / (match + mismatch + del).")
     p.add_argument("--acc_min_coverage", type=float, default=0.0,
                    help="Minimum reference coverage required to count a read for accuracy.")
     p.add_argument("--ctc_crf_state_len", type=int, default=5,
                    help="State length for Bonito CTC-CRF (used to set output classes).")
-    p.add_argument("--ctc_crf_blank_score", type=float, default=None,
-                   help="If set, overwrite CTC-CRF blank scores with this fixed value (disables blank training).")
+    p.add_argument("--ctc_crf_blank_score", type=float, default=2.0,
+                   help="Fixed blank score for CTC-CRF (blank is not trained).")
 
 
     return p.parse_args()
@@ -565,15 +561,12 @@ def main():
         logger.info(f"[Args] {vars(args)}")
 
     # ---- model (先建模型拿 tokenizer，保持原数据逻辑) ----
-    num_classes = None
-    head_blank_idx = 0
-    if args.loss_type == "ctc-crf":
-        import os as _os
-        from . import ctc_crf as crf_backend
+    import os as _os
+    from . import ctc_crf as crf_backend
 
-        _os.environ["CTC_CRF_STATE_LEN"] = str(args.ctc_crf_state_len)
-        num_classes = crf_backend.crf_num_classes(args.ctc_crf_state_len)
-        head_blank_idx = None
+    _os.environ["CTC_CRF_STATE_LEN"] = str(args.ctc_crf_state_len)
+    num_classes = crf_backend.crf_num_classes_no_blank(args.ctc_crf_state_len)
+    head_blank_idx = None
 
     if args.head_linear:
         args.head_layers = 0
@@ -727,8 +720,6 @@ def main():
         logger.info(f"[Scheduler] steps_per_epoch={steps_per_epoch} total_steps={total_steps} "
                     f"warmup_steps={warmup_steps} scheduler={sched_name}")
 
-    ctc_loss = nn.CTCLoss(blank=BLANK_IDX, reduction="mean", zero_infinity=True)
-
     # ---- optional pretrained weights (only if NOT resuming) ----
     if args.pretrained_ckpt and not args.resume_ckpt:
         load_pretrained_weights(
@@ -779,7 +770,6 @@ def main():
 
         tr_loss = train_one_epoch(
             model,
-            ctc_loss,
             train_loader,
             optimizer,
             scheduler,
@@ -787,8 +777,6 @@ def main():
             rank,
             args.log_interval,
             use_wandb,
-            args.aux_blank_weight,
-            args.loss_type,
             args.ctc_crf_blank_score,
         )
         train_losses.append(tr_loss)
@@ -802,12 +790,10 @@ def main():
                 val_sampler.set_epoch(epoch)
             val_loss, val_acc = eval_one_epoch(
                 model,
-                ctc_loss,
                 val_loader,
                 device,
                 rank,
                 "val",
-                args.loss_type,
                 args.ctc_crf_blank_score,
                 args.acc_balanced,
                 args.acc_min_coverage,
@@ -856,12 +842,10 @@ def main():
     if test_loader is not None:
         test_loss, test_acc = eval_one_epoch(
             model,
-            ctc_loss,
             test_loader,
             device,
             rank,
             "test",
-            args.loss_type,
             args.ctc_crf_blank_score,
             args.acc_balanced,
             args.acc_min_coverage,
@@ -897,7 +881,11 @@ def main():
                 attention_mask=attention_mask,
                 input_lengths=batch.get("input_lengths"),
             )
-            pred_seqs = ctc_greedy_decode(logits_tbc, blank_idx=BLANK_IDX, input_lengths=input_lengths)
+            pred_seqs = koi_beam_search_decode(
+                logits_tbc,
+                blank_score=float(args.ctc_crf_blank_score),
+                input_lengths=input_lengths,
+            )
             ref_seqs = batch["target_seqs"]
             fig = plot_alignment_heatmap(pred_seqs, ref_seqs, max_reads=32, max_len=80)
             wandb.log({"final/base_alignment": wandb.Image(fig)})

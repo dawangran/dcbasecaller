@@ -10,11 +10,8 @@ from .utils import (
 )
 from .model import BasecallModel
 from .metrics import (
-    ctc_greedy_decode,
-    ctc_beam_search_decode,
     koi_beam_search_decode,
     batch_pbma,
     batch_bonito_accuracy,
-    inspect_batch,
     plot_curves,
 )
