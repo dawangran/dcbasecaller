@@ -32,7 +32,7 @@ from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from tqdm.auto import tqdm
 
-from .utils import seed_everything, BLANK_IDX, resolve_input_lengths
+from .utils import seed_everything, BLANK_IDX, ID2BASE, resolve_input_lengths
 from .model import BasecallModel
 from .metrics import (
     koi_beam_search_decode,
@@ -290,7 +290,7 @@ def train_one_epoch(
             input_lengths,
             target_lengths,
             blank_idx=BLANK_IDX,
-            pad_blank=True,
+            pad_blank=False,
             blank_score=float(ctc_crf_blank_score),
         )
         if torch.isfinite(loss):
@@ -356,7 +356,7 @@ def eval_one_epoch(
             input_lengths,
             target_lengths,
             blank_idx=BLANK_IDX,
-            pad_blank=True,
+            pad_blank=False,
             blank_score=float(ctc_crf_blank_score),
         )
         total_loss += float(loss.item())
@@ -573,6 +573,7 @@ def main():
         args.head_use_transformer = False
         args.head_disable_pointwise = True
 
+    n_base = len(ID2BASE) - 1
     base_model = BasecallModel(
         model_path=args.model_name_or_path,
         num_classes=num_classes if num_classes is not None else None,
@@ -592,6 +593,8 @@ def main():
         head_blank_idx=head_blank_idx,
         head_output_activation=args.head_output_activation,
         head_output_scale=args.head_output_scale,
+        head_crf_blank_score=float(args.ctc_crf_blank_score),
+        head_crf_n_base=n_base,
     ).to(device)
 
     model = base_model

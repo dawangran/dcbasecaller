@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from transformers import AutoTokenizer, AutoModel
 
 from .utils import NUM_CLASSES
@@ -27,6 +28,9 @@ class BasecallHead(nn.Module):
         transformer_dropout: float = 0.1,
         output_activation: str | None = None,
         output_scale: float | None = None,
+        crf_blank_score: float | None = None,
+        crf_n_base: int | None = None,
+        crf_expand_blanks: bool = True,
     ):
         super().__init__()
         self.norm = nn.LayerNorm(hidden_size)
@@ -98,6 +102,17 @@ class BasecallHead(nn.Module):
                 raise ValueError(f"Unknown output_activation: {self.output_activation}")
         if self.output_scale is not None:
             x = x * self.output_scale
+        if crf_blank_score is not None and crf_expand_blanks:
+            if crf_n_base is None or crf_n_base <= 0:
+                raise ValueError("crf_n_base must be set when expanding CRF blanks.")
+            bsz, t_len, n_scores = x.shape
+            if n_scores % crf_n_base != 0:
+                raise ValueError("CRF score dim must be divisible by crf_n_base for blank expansion.")
+            x = F.pad(
+                x.view(bsz, t_len, n_scores // crf_n_base, crf_n_base),
+                (1, 0),
+                value=float(crf_blank_score),
+            ).view(bsz, t_len, -1)
         return x
 
 
@@ -126,6 +141,9 @@ class BasecallModel(nn.Module):
         head_blank_idx: int | None = 0,
         head_output_activation: str | None = None,
         head_output_scale: float | None = None,
+        head_crf_blank_score: float | None = None,
+        head_crf_n_base: int | None = None,
+        head_crf_expand_blanks: bool = True,
     ):
         super().__init__()
         self.hidden_layer = hidden_layer
@@ -200,6 +218,9 @@ class BasecallModel(nn.Module):
             transformer_dropout=head_transformer_dropout,
             output_activation=head_output_activation,
             output_scale=head_output_scale,
+            crf_blank_score=head_crf_blank_score,
+            crf_n_base=head_crf_n_base,
+            crf_expand_blanks=head_crf_expand_blanks,
         )
 
     def _get_transformer_layers(self) -> nn.ModuleList:

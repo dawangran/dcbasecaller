@@ -257,6 +257,7 @@ def main() -> None:
 
     state_dict = load_checkpoint_state(args.ckpt)
     head_config = infer_head_config_from_state_dict(state_dict)
+    n_base = len(ID2BASE) - 1
     model = BasecallModel(
         model_path=args.model_name_or_path,
         num_classes=head_config["num_classes"],
@@ -269,6 +270,8 @@ def main() -> None:
         head_transformer_heads=head_config["head_transformer_heads"],
         head_output_activation=args.head_output_activation,
         head_output_scale=args.head_output_scale,
+        head_crf_blank_score=float(args.koi_blank_score),
+        head_crf_n_base=n_base,
     ).to(device)
     model.load_state_dict(state_dict, strict=False)
     model.eval()
