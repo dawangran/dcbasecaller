@@ -110,6 +110,7 @@ basecall-train \
 - `--model_name_or_path`: HuggingFace model ID or local path.
 - `--hidden-layer`: which hidden layer to use (`-1` = last, `-2` = second last).
 - `--freeze_backbone`: freeze backbone, train head only.
+- `--reset_backbone_weights`: reinitialize backbone weights for ablation.
 - `--unfreeze_last_n_layers`: unfreeze last N transformer layers.
 - `--unfreeze_layer_start`, `--unfreeze_layer_end`: unfreeze layers in range `[start, end)`.
 

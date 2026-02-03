@@ -510,6 +510,8 @@ def parse_args():
                    help="Save ckpt_best.pt based on best val_acc (default off unless provided).")
     p.add_argument("--freeze_backbone", action="store_true",
                    help="Freeze backbone parameters; train only base_head.")
+    p.add_argument("--reset_backbone_weights", action="store_true",
+                   help="Reinitialize backbone weights for ablation (ignores pretrained backbone init).")
     p.add_argument("--unfreeze_last_n_layers", type=int, default=0,
                    help="Unfreeze only the last N backbone layers (default: 0).")
     p.add_argument("--unfreeze_layer_start", type=int, default=None,
@@ -579,6 +581,7 @@ def main():
         num_classes=num_classes if num_classes is not None else None,
         hidden_layer=args.hidden_layer,
         freeze_backbone=bool(args.freeze_backbone),
+        reset_backbone_weights=bool(args.reset_backbone_weights),
         unfreeze_last_n_layers=args.unfreeze_last_n_layers,
         unfreeze_layer_start=args.unfreeze_layer_start,
         unfreeze_layer_end=args.unfreeze_layer_end,

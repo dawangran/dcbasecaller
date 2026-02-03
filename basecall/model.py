@@ -127,6 +127,7 @@ class BasecallModel(nn.Module):
         num_classes: int = NUM_CLASSES,
         hidden_layer: int = -1,          # 选哪一层 hidden_states
         freeze_backbone: bool = False,   # ✅ 新增：是否冻结基座（默认不冻结，保持你原行为）
+        reset_backbone_weights: bool = False,  # ✅ 可选：重置基座权重用于消融
         unfreeze_last_n_layers: int = 0,  # 可选：仅解冻最后 N 层（其余保持冻结）
         unfreeze_layer_start: int | None = None,
         unfreeze_layer_end: int | None = None,
@@ -160,6 +161,11 @@ class BasecallModel(nn.Module):
             model_path,
             trust_remote_code=True,
         )
+        if reset_backbone_weights:
+            if hasattr(self.backbone, "init_weights"):
+                self.backbone.init_weights()
+            else:
+                self.backbone.apply(self._init_backbone_weights)
 
         # 省显存：关闭 cache（很多 decoder-only 默认开）
         if hasattr(self.backbone.config, "use_cache"):
@@ -242,6 +248,11 @@ class BasecallModel(nn.Module):
             if obj is not None and isinstance(obj, (nn.ModuleList, list, tuple)):
                 return nn.ModuleList(list(obj))
         raise ValueError("Cannot locate transformer layers for partial unfreezing.")
+
+    @staticmethod
+    def _init_backbone_weights(module: nn.Module) -> None:
+        if hasattr(module, "reset_parameters"):
+            module.reset_parameters()
 
     def train(self, mode: bool = True):
         """✅ 防止外面 model.train() 把 backbone 切回 train（dropout 会动）"""
