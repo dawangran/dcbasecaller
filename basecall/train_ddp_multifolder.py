@@ -570,8 +570,8 @@ def main():
     n_base = len(ID2BASE) - 1
     if n_base <= 0:
         raise ValueError("CTC-CRF alphabet must include at least one non-blank base.")
-    # CTC-CRF head emits no-blank scores; blank is injected later with a fixed score.
-    num_classes = (n_base ** args.ctc_crf_state_len) * n_base
+    # CTC-CRF head emits full (blank+base) scores; blank score is overwritten during forward.
+    num_classes = (n_base ** args.ctc_crf_state_len) * (n_base + 1)
 
     base_model = BasecallModel(
         model_path=args.model_name_or_path,
