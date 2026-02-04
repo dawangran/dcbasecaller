@@ -390,7 +390,7 @@ def eval_one_epoch(
                 n_cov += 1
                 continue
             decoded_ids = ctc_crf_decode(logits_tbc[:step_len, idx : idx + 1, :], blank_idx=BLANK_IDX)[0]
-            decoded_len = len(decoded_ids)
+            decoded_len = min(len(decoded_ids), step_len)
             blank_ratio = max(1.0 - (decoded_len / max(step_len, 1)), 0.0)
             blank_ratios.append(blank_ratio)
             nonzero_len = float(decoded_len)
