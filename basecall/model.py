@@ -31,7 +31,7 @@ class LinearCRFEncoder(nn.Module):
         self.state_len = state_len
         self.blank_score = blank_score
         self.expand_blanks = expand_blanks
-        size = (n_base + 1) * n_base**state_len
+        size = (n_base + 1) * n_base**state_len if blank_score is None else n_base**(state_len + 1)
         self.linear = nn.Linear(insize, size, bias=bias)
         if activation is None:
             self.activation = None
@@ -57,10 +57,11 @@ class LinearCRFEncoder(nn.Module):
             if not scores.is_contiguous():
                 scores = scores.contiguous()
             bsz, t_len, n_scores = scores.shape
-            if n_scores != (self.n_base + 1) * (self.n_base ** self.state_len):
-                raise ValueError("CRF score dim must match full (blank+base) size.")
-            scores = scores.view(bsz, t_len, self.n_base ** self.state_len, self.n_base + 1)
-            scores[..., 0] = float(self.blank_score)
+            expected = self.n_base ** (self.state_len + 1)
+            if n_scores != expected:
+                raise ValueError("CRF score dim must match no-blank size when blank_score is set.")
+            scores = scores.view(bsz, t_len, n_scores // self.n_base, self.n_base)
+            scores = F.pad(scores, (1, 0), value=float(self.blank_score))
             scores = scores.view(bsz, t_len, -1)
         return scores
 
