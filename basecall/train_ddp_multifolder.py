@@ -331,7 +331,7 @@ def eval_one_epoch(
     total_acc, n_acc = 0.0, 0
     total_cov, n_cov = 0.0, 0
     blank_ratios: List[float] = []
-    nonzero_lengths: List[int] = []
+    nonzero_lengths: List[float] = []
 
     it = tqdm(data_loader, total=len(data_loader),
               disable=not is_main_process(rank), desc=f"[{split_name}]")
@@ -378,11 +378,13 @@ def eval_one_epoch(
         )
         total_acc += float(acc)
         n_acc += 1
-        for p_ids, r_ids in zip(pred_seqs, batch["target_seqs"]):
+        input_len_list = input_lengths.detach().cpu().tolist()
+        for p_ids, r_ids, input_len in zip(pred_seqs, batch["target_seqs"], input_len_list):
             seq_len = len(p_ids)
             zero_count = sum(1 for token in p_ids if token == BLANK_IDX)
-            blank_ratios.append(zero_count / max(seq_len, 1))
-            nonzero_len = seq_len - zero_count
+            blank_ratio = zero_count / max(seq_len, 1)
+            blank_ratios.append(blank_ratio)
+            nonzero_len = max(float(input_len) * (1.0 - blank_ratio), 0.0)
             nonzero_lengths.append(nonzero_len)
             ref_len = max(len(r_ids), 1)
             total_cov += nonzero_len / ref_len
