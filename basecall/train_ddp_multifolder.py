@@ -42,6 +42,7 @@ from .metrics import (
     save_metrics_csv,
     ctc_crf_loss,
 )
+from .ctc_crf import decode as ctc_crf_decode
 from .data_multifolder import (
     scan_jsonl_files,
     split_jsonl_files_by_group,
@@ -379,12 +380,20 @@ def eval_one_epoch(
         total_acc += float(acc)
         n_acc += 1
         input_len_list = input_lengths.detach().cpu().tolist()
-        for p_ids, r_ids, input_len in zip(pred_seqs, batch["target_seqs"], input_len_list):
-            seq_len = len(p_ids)
-            zero_count = sum(1 for token in p_ids if token == BLANK_IDX)
-            blank_ratio = zero_count / max(seq_len, 1)
+        for idx, (r_ids, input_len) in enumerate(zip(batch["target_seqs"], input_len_list)):
+            step_len = int(input_len)
+            if step_len <= 0:
+                blank_ratios.append(1.0)
+                nonzero_lengths.append(0.0)
+                ref_len = max(len(r_ids), 1)
+                total_cov += 0.0
+                n_cov += 1
+                continue
+            decoded_ids = ctc_crf_decode(logits_tbc[:step_len, idx : idx + 1, :], blank_idx=BLANK_IDX)[0]
+            decoded_len = len(decoded_ids)
+            blank_ratio = max(1.0 - (decoded_len / max(step_len, 1)), 0.0)
             blank_ratios.append(blank_ratio)
-            nonzero_len = max(float(input_len) * (1.0 - blank_ratio), 0.0)
+            nonzero_len = float(decoded_len)
             nonzero_lengths.append(nonzero_len)
             ref_len = max(len(r_ids), 1)
             total_cov += nonzero_len / ref_len
