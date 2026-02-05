@@ -209,6 +209,8 @@ def ctc_crf_loss(
         if time_len <= 0:
             continue
         target_len = int(target_lengths[i].item())
+        if target_len <= 0:
+            continue
         sample_targets = padded_targets[i : i + 1, :target_len]
         sample_target_lengths = target_lengths[i : i + 1]
         sample_scores = logits_tbc[:time_len, i : i + 1, :]
