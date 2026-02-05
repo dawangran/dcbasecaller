@@ -17,6 +17,13 @@ The core workflow is:
 pip install -e .
 ```
 
+For decoding/training with CTC-CRF and Bonito-style metrics, also ensure these runtime dependencies are available:
+
+```bash
+pip install parasail edlib
+# and install ont-koi matching your torch/cuda build
+```
+
 ## 1) Data Format
 
 ### JSONL.GZ

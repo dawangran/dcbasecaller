@@ -326,12 +326,13 @@ def eval_one_epoch(
     acc_min_coverage: float,
 ) -> Tuple[float, float, float, float, float, float]:
     model.eval()
-    total_loss, n_batches = 0.0, 0
-    total_acc, n_acc = 0.0, 0
-    total_crf_acc, n_crf_acc = 0.0, 0
-    total_cov, n_cov = 0.0, 0
-    blank_ratios: List[float] = []
-    nonzero_lengths: List[float] = []
+
+    sum_loss, n_loss = 0.0, 0
+    sum_acc, n_acc = 0.0, 0
+    sum_crf_acc, n_crf_acc = 0.0, 0
+    sum_cov, n_cov = 0.0, 0
+    sum_blank, n_blank = 0.0, 0
+    sum_nonzero_len, n_nonzero_len = 0.0, 0
 
     it = tqdm(data_loader, total=len(data_loader),
               disable=not is_main_process(rank), desc=f"[{split_name}]")
@@ -345,13 +346,12 @@ def eval_one_epoch(
 
         target_labels = batch["target_labels"].to(device)
         target_lengths = batch["target_lengths"].to(device)
-        
+
         attention_mask = batch.get("attention_mask", None)
         if attention_mask is not None:
             attention_mask = attention_mask.to(device)
         logits_btc = model(input_ids, attention_mask=attention_mask)
 
-        # logits_btc = model(input_ids)              # [B,T,C]
         logits_tbc = logits_btc.transpose(0, 1)    # [T,B,C]
 
         loss = ctc_crf_loss(
@@ -361,66 +361,97 @@ def eval_one_epoch(
             target_lengths,
             blank_idx=BLANK_IDX,
         )
-        
-        total_loss += float(loss.item())
-        n_batches += 1
+        valid_loss_count = int((input_lengths > 0).sum().item())
+        if valid_loss_count > 0:
+            sum_loss += float(loss.item()) * float(valid_loss_count)
+            n_loss += valid_loss_count
+
         pred_seqs = koi_beam_search_decode(
             logits_tbc,
             blank_score=float(ctc_crf_blank_score),
             input_lengths=input_lengths,
         )
-        acc = batch_bonito_accuracy(
-            pred_seqs,
-            batch["target_seqs"],
-            balanced=acc_balanced,
-            min_coverage=acc_min_coverage,
-        )
-        total_acc += float(acc)
-        n_acc += 1
         input_len_list = input_lengths.detach().cpu().tolist()
+
+        # Per-read accumulation to avoid batch-size bias.
+        for p_ids, r_ids in zip(pred_seqs, batch["target_seqs"]):
+            read_acc = batch_bonito_accuracy(
+                [p_ids],
+                [r_ids],
+                balanced=acc_balanced,
+                min_coverage=acc_min_coverage,
+            )
+            sum_acc += float(read_acc)
+            n_acc += 1
+
         crf_decoded = []
         for idx, (r_ids, input_len) in enumerate(zip(batch["target_seqs"], input_len_list)):
             step_len = int(input_len)
             if step_len <= 0:
-                blank_ratios.append(1.0)
-                nonzero_lengths.append(0.0)
+                sum_blank += 1.0
+                n_blank += 1
+                sum_nonzero_len += 0.0
+                n_nonzero_len += 1
                 ref_len = max(len(r_ids), 1)
-                total_cov += 0.0
+                sum_cov += 0.0 / ref_len
                 n_cov += 1
                 crf_decoded.append([])
                 continue
             decoded_ids = ctc_crf_decode(logits_tbc[:step_len, idx : idx + 1, :], blank_idx=BLANK_IDX)[0]
             decoded_len = min(len(decoded_ids), step_len)
-            crf_decoded.append(decoded_ids[:decoded_len])
+            crf_decoded_ids = decoded_ids[:decoded_len]
+            crf_decoded.append(crf_decoded_ids)
+
             blank_ratio = max(1.0 - (decoded_len / max(step_len, 1)), 0.0)
-            blank_ratios.append(blank_ratio)
+            sum_blank += float(blank_ratio)
+            n_blank += 1
+
             nonzero_len = float(decoded_len)
-            nonzero_lengths.append(nonzero_len)
+            sum_nonzero_len += nonzero_len
+            n_nonzero_len += 1
+
             ref_len = max(len(r_ids), 1)
-            total_cov += nonzero_len / ref_len
+            sum_cov += nonzero_len / ref_len
             n_cov += 1
-        crf_acc = batch_bonito_accuracy(
-            crf_decoded,
-            batch["target_seqs"],
-            balanced=acc_balanced,
-            min_coverage=acc_min_coverage,
-        )
-        total_crf_acc += float(crf_acc)
-        n_crf_acc += 1
 
-    avg_loss = total_loss / max(n_batches, 1)
-    avg_acc = total_acc / max(n_acc, 1)
-    avg_crf_acc = total_crf_acc / max(n_crf_acc, 1)
-    avg_cov = total_cov / max(n_cov, 1)
-    avg_blank = float(np.mean(blank_ratios)) if blank_ratios else 0.0
-    avg_nonzero_len = float(np.mean(nonzero_lengths)) if nonzero_lengths else 0.0
+        for p_ids, r_ids in zip(crf_decoded, batch["target_seqs"]):
+            read_crf_acc = batch_bonito_accuracy(
+                [p_ids],
+                [r_ids],
+                balanced=acc_balanced,
+                min_coverage=acc_min_coverage,
+            )
+            sum_crf_acc += float(read_crf_acc)
+            n_crf_acc += 1
 
-    avg_loss = float(reduce_mean(torch.tensor(avg_loss, device=device)).item())
-    avg_acc = float(reduce_mean(torch.tensor(avg_acc, device=device)).item())
-    avg_crf_acc = float(reduce_mean(torch.tensor(avg_crf_acc, device=device)).item())
-    avg_cov = float(reduce_mean(torch.tensor(avg_cov, device=device)).item())
-    avg_blank = float(reduce_mean(torch.tensor(avg_blank, device=device)).item())
-    avg_nonzero_len = float(reduce_mean(torch.tensor(avg_nonzero_len, device=device)).item())
+    stats = torch.tensor(
+        [
+            sum_loss,
+            float(n_loss),
+            sum_acc,
+            float(n_acc),
+            sum_crf_acc,
+            float(n_crf_acc),
+            sum_cov,
+            float(n_cov),
+            sum_blank,
+            float(n_blank),
+            sum_nonzero_len,
+            float(n_nonzero_len),
+        ],
+        device=device,
+        dtype=torch.float64,
+    )
+
+    if dist.is_available() and dist.is_initialized():
+        dist.all_reduce(stats, op=dist.ReduceOp.SUM)
+
+    avg_loss = float((stats[0] / stats[1].clamp_min(1.0)).item())
+    avg_acc = float((stats[2] / stats[3].clamp_min(1.0)).item())
+    avg_crf_acc = float((stats[4] / stats[5].clamp_min(1.0)).item())
+    avg_cov = float((stats[6] / stats[7].clamp_min(1.0)).item())
+    avg_blank = float((stats[8] / stats[9].clamp_min(1.0)).item())
+    avg_nonzero_len = float((stats[10] / stats[11].clamp_min(1.0)).item())
     return avg_loss, avg_acc, avg_crf_acc, avg_cov, avg_blank, avg_nonzero_len
 
 
