@@ -526,7 +526,7 @@ def parse_args():
     p.add_argument("--num_epochs", type=int, default=50)
     p.add_argument("--num_workers", type=int, default=4)
     p.add_argument("--quick", action="store_true",
-                   help="Quick mode alias: freeze backbone + ctc_crf_state_len=4 + ctc_crf_blank_score=2 + head_output_scale=5 + head_output_activation=tanh.")
+                   help="Quick mode alias: freeze backbone + ctc_crf_state_len=5 + ctc_crf_blank_score=2 + head_output_scale=5 + head_output_activation=tanh.")
 
     p.add_argument("--lr", type=float, default=3e-4)
     p.add_argument("--weight_decay", type=float, default=1e-3)
@@ -585,7 +585,7 @@ def apply_quick_overrides(args) -> None:
     if not args.quick:
         return
     args.freeze_backbone = True
-    args.ctc_crf_state_len = 4
+    args.ctc_crf_state_len = 5
     args.ctc_crf_blank_score = 2.0
     args.head_output_scale = 5.0
     args.head_output_activation = "tanh"
@@ -604,7 +604,7 @@ def main():
         logger.info(f"[DDP] world_size={world_size}, rank={rank}, local_rank={local_rank}, device={device}")
         logger.info(f"[Args] {vars(args)}")
         if args.quick:
-            logger.info("[Quick] enabled: freeze_backbone=True, ctc_crf_state_len=4, ctc_crf_blank_score=2, head_output_scale=5, head_output_activation=tanh")
+            logger.info("[Quick] enabled: freeze_backbone=True, ctc_crf_state_len=5, ctc_crf_blank_score=2, head_output_scale=5, head_output_activation=tanh")
 
     # ---- model (先建模型拿 tokenizer，保持原数据逻辑) ----
     import os as _os

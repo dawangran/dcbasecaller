@@ -82,7 +82,7 @@ basecall-train \
 
 `--quick` expands to:
 - `--freeze_backbone`
-- `--ctc_crf_state_len 4`
+- `--ctc_crf_state_len 5`
 - `--ctc_crf_blank_score 2`
 - `--head_output_scale 5`
 - `--head_output_activation tanh`
