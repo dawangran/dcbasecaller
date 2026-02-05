@@ -87,7 +87,7 @@ def parasail_to_sam(result, seq):
     :returns: reference start coordinate, cigar string.
     """
     cigstr = result.cigar.decode.decode()
-    first = re.search(split_cigar, cigstr)
+    first = re.search(_SPLIT_CIGAR, cigstr)
 
     first_count, first_op = first.groups()
     prefix = first.group()
@@ -117,15 +117,18 @@ def cal_bonito_accuracy(pred_seq, ref_seq, balanced=False, min_coverage=0.0):
     alignment = parasail.sw_trace_striped_32(pred_seq, ref_seq, 8, 4, parasail.dnafull)
     counts = defaultdict(int)
 
-    q_coverage = len(alignment.traceback.query) / len(seq)
-    r_coverage = len(alignment.traceback.ref) / len(ref)
+    if len(ref_seq) == 0:
+        return 0.0
+
+    q_coverage = len(alignment.traceback.query) / max(len(pred_seq), 1)
+    r_coverage = len(alignment.traceback.ref) / max(len(ref_seq), 1)
 
     if r_coverage < min_coverage:
         return 0.0
 
-    _, cigar = parasail_to_sam(alignment, seq)
+    _, cigar = parasail_to_sam(alignment, pred_seq)
 
-    for count, op  in re.findall(split_cigar, cigar):
+    for count, op in re.findall(_SPLIT_CIGAR, cigar):
         counts[op] += int(count)
 
     if balanced:
