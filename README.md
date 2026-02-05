@@ -87,7 +87,6 @@ basecall-train \
 - `--head_output_scale 5`
 - `--head_output_activation tanh`
 
-Legacy `--quick_train` is still supported and keeps its old behavior (`--freeze_backbone` + `--ctc_crf_state_len 5`).
 
 ### Use explicit train/val/test folders (skip auto split, jsonl.gz)
 

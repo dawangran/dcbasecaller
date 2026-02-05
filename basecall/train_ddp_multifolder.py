@@ -525,8 +525,6 @@ def parse_args():
     p.add_argument("--batch_size", type=int, default=128)
     p.add_argument("--num_epochs", type=int, default=50)
     p.add_argument("--num_workers", type=int, default=4)
-    p.add_argument("--quick_train", action="store_true",
-                   help="Quick train mode (legacy): freeze backbone and force ctc_crf_state_len=5.")
     p.add_argument("--quick", action="store_true",
                    help="Quick mode alias: freeze backbone + ctc_crf_state_len=4 + ctc_crf_blank_score=2 + head_output_scale=5 + head_output_activation=tanh.")
 
@@ -583,24 +581,19 @@ def parse_args():
 
 # -------------------- main --------------------
 
-def apply_quick_train_overrides(args) -> None:
-    if args.quick:
-        args.freeze_backbone = True
-        args.ctc_crf_state_len = 4
-        args.ctc_crf_blank_score = 2.0
-        args.head_output_scale = 5.0
-        args.head_output_activation = "tanh"
+def apply_quick_overrides(args) -> None:
+    if not args.quick:
         return
-
-    if args.quick_train:
-        # Keep legacy behavior to avoid dimension mismatches in existing runs/checkpoints.
-        args.freeze_backbone = True
-        args.ctc_crf_state_len = 5
+    args.freeze_backbone = True
+    args.ctc_crf_state_len = 4
+    args.ctc_crf_blank_score = 2.0
+    args.head_output_scale = 5.0
+    args.head_output_activation = "tanh"
 
 
 def main():
     args = parse_args()
-    apply_quick_train_overrides(args)
+    apply_quick_overrides(args)
     rank, world_size, local_rank, device, ddp_enabled = init_distributed()
 
     seed_everything(args.seed + rank)
@@ -612,8 +605,6 @@ def main():
         logger.info(f"[Args] {vars(args)}")
         if args.quick:
             logger.info("[Quick] enabled: freeze_backbone=True, ctc_crf_state_len=4, ctc_crf_blank_score=2, head_output_scale=5, head_output_activation=tanh")
-        elif args.quick_train:
-            logger.info("[Quick Train legacy] enabled: freeze_backbone=True, ctc_crf_state_len=5")
 
     # ---- model (先建模型拿 tokenizer，保持原数据逻辑) ----
     import os as _os
