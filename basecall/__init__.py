@@ -11,7 +11,6 @@ from .utils import (
 from .model import BasecallModel
 from .metrics import (
     koi_beam_search_decode,
-    batch_pbma,
     batch_bonito_accuracy,
     plot_curves,
 )

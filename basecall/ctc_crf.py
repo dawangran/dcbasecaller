@@ -182,26 +182,6 @@ def _get_model() -> CTC_CRF:
     return _MODEL_CACHE[2]
 
 
-def _collapse_paths(paths: torch.Tensor) -> List[List[int]]:
-    if paths.dim() != 2:
-        raise ValueError("Expected viterbi paths with shape [T, B].")
-    paths = paths.transpose(0, 1).cpu().numpy()
-    collapsed: List[List[int]] = []
-    for seq in paths:
-        out: List[int] = []
-        prev = None
-        for token in seq:
-            token = int(token)
-            if token == 0:
-                prev = token
-                continue
-            if token != prev:
-                out.append(token)
-            prev = token
-        collapsed.append(out)
-    return collapsed
-
-
 def ctc_crf_loss(
     logits_tbc: torch.Tensor,
     targets: torch.Tensor,
@@ -236,6 +216,26 @@ def ctc_crf_loss(
     if not losses:
         return logits_tbc.new_tensor(0.0)
     return torch.stack(losses).mean()
+
+
+def _collapse_paths(paths: torch.Tensor) -> List[List[int]]:
+    if paths.dim() != 2:
+        raise ValueError("Expected viterbi paths with shape [T, B].")
+    paths = paths.transpose(0, 1).cpu().numpy()
+    collapsed: List[List[int]] = []
+    for seq in paths:
+        out: List[int] = []
+        prev = None
+        for token in seq:
+            token = int(token)
+            if token == 0:
+                prev = token
+                continue
+            if token != prev:
+                out.append(token)
+            prev = token
+        collapsed.append(out)
+    return collapsed
 
 
 def decode(logits_tbc: torch.Tensor, blank_idx: int = 0) -> List[List[int]]:

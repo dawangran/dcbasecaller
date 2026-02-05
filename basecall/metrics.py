@@ -10,15 +10,14 @@ import torch
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
 from matplotlib.ticker import MaxNLocator
-import edlib
+import parasail
+from collections import defaultdict, OrderedDict
+
 
 from .utils import BLANK_IDX, ID2BASE, BASE2ID
 
-_PARASAIL_AVAILABLE = importlib.util.find_spec("parasail") is not None
-if _PARASAIL_AVAILABLE:
-    import parasail  # type: ignore
 
-_SPLIT_CIGAR = re.compile(r"(\d+)([=XID])")
+_SPLIT_CIGAR = re.compile(r"(?P<len>\d+)(?P<op>\D+)")
 
 
 def koi_beam_search_decode(
@@ -51,6 +50,7 @@ def koi_beam_search_decode(
         scores = logits_tbc[:length, b : b + 1, :]
         if scores.is_cuda:
             scores = scores.half()
+            scores = scores.transpose(0, 1)
         sequence, _qstring, _moves = beam_search(
             scores,
             beam_width=beam_width,
@@ -61,177 +61,10 @@ def koi_beam_search_decode(
         )
         if reverse:
             sequence = sequence[::-1]
-        seq_str = sequence if isinstance(sequence, str) else to_str(sequence)
+        seq_str = sequence if isinstance(sequence[0], str) else to_str(sequence[0])
         decoded.append([BASE2ID.get(base, BLANK_IDX) for base in seq_str])
     return decoded
 
-
-
-
-def ctc_crf_loss(
-    logits_tbc: torch.Tensor,
-    target_labels: torch.Tensor,
-    input_lengths: torch.Tensor,
-    target_lengths: torch.Tensor,
-    blank_idx: int = BLANK_IDX,
-    pad_blank: bool = False,
-    blank_score: float = 0.0,
-) -> torch.Tensor:
-    try:
-        from . import ctc_crf  # type: ignore
-    except Exception as exc:
-        raise ImportError(
-            "ctc-crf loss requested but ctc_crf is not installed. "
-            "Install a CTC-CRF implementation and expose a ctc_crf_loss() API."
-        ) from exc
-
-    if not hasattr(ctc_crf, "ctc_crf_loss"):
-        raise ImportError(
-            "ctc_crf.ctc_crf_loss not found. Provide a CTC-CRF library with "
-            "ctc_crf_loss(logits_tbc, targets, input_lengths, target_lengths, blank_idx)."
-        )
-
-    if pad_blank:
-        logits_tbc = _pad_ctc_crf_blank(logits_tbc, blank_score)
-
-    return ctc_crf.ctc_crf_loss(
-        logits_tbc, target_labels, input_lengths, target_lengths, blank_idx=blank_idx
-    )
-
-
-def _pad_ctc_crf_blank(logits_tbc: torch.Tensor, blank_score: float) -> torch.Tensor:
-    state_len = int(os.environ.get("CTC_CRF_STATE_LEN", "5"))
-    n_base = len(ID2BASE) - 1
-    if n_base <= 0:
-        raise ValueError("CTC-CRF alphabet must include at least one non-blank base.")
-    no_blank_dim = (n_base ** state_len) * n_base
-    full_dim = (n_base + 1) * (n_base ** state_len)
-    if logits_tbc.size(-1) == full_dim:
-        t_len, batch, _ = logits_tbc.shape
-        reshaped = logits_tbc.view(t_len, batch, n_base ** state_len, n_base + 1)
-        reshaped = reshaped.clone()
-        reshaped[..., 0] = float(blank_score)
-        return reshaped.view(t_len, batch, -1)
-    if logits_tbc.size(-1) != no_blank_dim:
-        raise ValueError(
-            f"CTC-CRF logits dim mismatch: got {logits_tbc.size(-1)}, "
-            f"expected {no_blank_dim} (no-blank) or {full_dim} (full)."
-        )
-    t_len, batch, _ = logits_tbc.shape
-    reshaped = logits_tbc.view(t_len, batch, no_blank_dim // n_base, n_base)
-    padded = F.pad(reshaped, (1, 0), value=float(blank_score))
-    return padded.view(t_len, batch, -1)
-
-
-# ---------------- PBMA ----------------
-
-def _parse_cigar(cigar: str) -> List[str]:
-    """
-    将 CIGAR 字符串 (如 '10=1X3=2I1=1D') 展开成操作序列:
-    返回类似 ['=', '=', ..., 'X', '=', ..., 'I', ...]
-    """
-    ops = []
-    num = ""
-    for ch in cigar:
-        if ch.isdigit():
-            num += ch
-        else:
-            n = int(num) if num else 1
-            ops.extend([ch] * n)
-            num = ""
-    return ops
-
-
-def _alignment_counts(pred_seq: str, ref_seq: str) -> Dict[str, int]:
-    """
-    统计对齐结果中的 '=' 'X' 'I' 'D' 数量。
-    返回 dict: match, mismatch, ins, del
-    """
-    counts = {"match": 0, "mismatch": 0, "ins": 0, "del": 0}
-    if not ref_seq and not pred_seq:
-        return counts
-
-    result = edlib.align(pred_seq, ref_seq, task="path")
-    cigar = result.get("cigar", None)
-    if not cigar:
-        return counts
-
-    ops = _parse_cigar(cigar)
-    for op in ops:
-        if op in {"=", "M"}:
-            counts["match"] += 1
-        elif op == "X":
-            counts["mismatch"] += 1
-        elif op == "D":
-            counts["del"] += 1
-        elif op == "I":
-            counts["ins"] += 1
-    return counts
-
-
-def _parasail_to_sam(result, seq: str) -> tuple[int, str]:
-    cigstr = result.cigar.decode.decode()
-    first = _SPLIT_CIGAR.search(cigstr)
-    if first is None:
-        return result.cigar.beg_ref, cigstr
-
-    first_count, first_op = first.groups()
-    prefix = first.group()
-    rstart = result.cigar.beg_ref
-    cliplen = result.cigar.beg_query
-
-    clip = "" if cliplen == 0 else f"{cliplen}S"
-    if first_op == "I":
-        pre = f"{int(first_count) + cliplen}S"
-    elif first_op == "D":
-        pre = clip
-        rstart = int(first_count)
-    else:
-        pre = f"{clip}{prefix}"
-
-    mid = cigstr[len(prefix):]
-    end_clip = len(seq) - result.end_query - 1
-    suf = f"{end_clip}S" if end_clip > 0 else ""
-    new_cigstr = "".join((pre, mid, suf))
-    return rstart, new_cigstr
-
-
-def _alignment_counts_parasail(pred_seq: str, ref_seq: str) -> tuple[Dict[str, int], float]:
-    alignment = parasail.sw_trace_striped_32(pred_seq, ref_seq, 8, 4, parasail.dnafull)
-    _, cigar = _parasail_to_sam(alignment, pred_seq)
-    counts = {"match": 0, "mismatch": 0, "ins": 0, "del": 0}
-    for count, op in _SPLIT_CIGAR.findall(cigar):
-        if op == "=":
-            counts["match"] += int(count)
-        elif op == "X":
-            counts["mismatch"] += int(count)
-        elif op == "D":
-            counts["del"] += int(count)
-        elif op == "I":
-            counts["ins"] += int(count)
-    r_coverage = len(alignment.traceback.ref) / max(len(ref_seq), 1)
-    return counts, r_coverage
-
-
-def _pbma_counts(pred_seq: str, ref_seq: str) -> Tuple[int, int]:
-    """
-    返回 (match, ref_len)，其中 ref_len = match + mismatch + del.
-    以参考序列为基准计算 PBMA，忽略插入项对分母的影响。
-    """
-    if not ref_seq:
-        return 0, 0
-    if not pred_seq:
-        return 0, len(ref_seq)
-
-    counts = _alignment_counts(pred_seq, ref_seq)
-    ref_len = counts["match"] + counts["mismatch"] + counts["del"]
-    return counts["match"], ref_len
-
-
-def cal_per_base_match_accuracy(pred_seq: str, ref_seq: str) -> float:
-    """PBMA = match / ref_len (ref_len = match + mismatch + del)"""
-    match, ref_len = _pbma_counts(pred_seq, ref_seq)
-    return match / ref_len if ref_len > 0 else 0.0
 
 
 def _ids_to_bases(ids: List[int], drop_blank: bool = True) -> str:
@@ -244,60 +77,62 @@ def _ids_to_bases(ids: List[int], drop_blank: bool = True) -> str:
             bases.append(base)
     return "".join(bases)
 
-
-def cal_bonito_accuracy(
-    pred_seq: str,
-    ref_seq: str,
-    balanced: bool = False,
-    min_coverage: float = 0.0,
-) -> float:
+def parasail_to_sam(result, seq):
     """
-    Bonito-style accuracy:
-      - default: match / (match + ins + mismatch + del)
-      - balanced: (match - ins) / (match + mismatch + del)
-    结果返回百分比（0-100）。
-    """
-    if not pred_seq or not ref_seq:
-        return 0.0
+    Extract reference start and sam compatible cigar string.
 
-    if _PARASAIL_AVAILABLE:
-        counts, r_coverage = _alignment_counts_parasail(pred_seq, ref_seq)
+    :param result: parasail alignment result.
+    :param seq: query sequence.
+
+    :returns: reference start coordinate, cigar string.
+    """
+    cigstr = result.cigar.decode.decode()
+    first = re.search(split_cigar, cigstr)
+
+    first_count, first_op = first.groups()
+    prefix = first.group()
+    rstart = result.cigar.beg_ref
+    cliplen = result.cigar.beg_query
+
+    clip = '' if cliplen == 0 else '{}S'.format(cliplen)
+    if first_op == 'I':
+        pre = '{}S'.format(int(first_count) + cliplen)
+    elif first_op == 'D':
+        pre = clip
+        rstart = int(first_count)
     else:
-        counts = _alignment_counts(pred_seq, ref_seq)
-        ref_len = counts["match"] + counts["mismatch"] + counts["del"]
-        if ref_len <= 0:
-            return 0.0
-        r_coverage = ref_len / max(len(ref_seq), 1)
+        pre = '{}{}'.format(clip, prefix)
+
+    mid = cigstr[len(prefix):]
+    end_clip = len(seq) - result.end_query - 1
+    suf = '{}S'.format(end_clip) if end_clip > 0 else ''
+    new_cigstr = ''.join((pre, mid, suf))
+    return rstart, new_cigstr
+
+
+def cal_bonito_accuracy(pred_seq, ref_seq, balanced=False, min_coverage=0.0):
+    """
+    Calculate the accuracy between `ref` and `seq`
+    """
+    alignment = parasail.sw_trace_striped_32(pred_seq, ref_seq, 8, 4, parasail.dnafull)
+    counts = defaultdict(int)
+
+    q_coverage = len(alignment.traceback.query) / len(seq)
+    r_coverage = len(alignment.traceback.ref) / len(ref)
+
     if r_coverage < min_coverage:
         return 0.0
 
+    _, cigar = parasail_to_sam(alignment, seq)
+
+    for count, op  in re.findall(split_cigar, cigar):
+        counts[op] += int(count)
+
     if balanced:
-        denom = counts["match"] + counts["mismatch"] + counts["del"]
-        score = (counts["match"] - counts["ins"]) / denom if denom > 0 else 0.0
+        accuracy = (counts['='] - counts['I']) / (counts['='] + counts['X'] + counts['D'])
     else:
-        denom = counts["match"] + counts["mismatch"] + counts["del"] + counts["ins"]
-        score = counts["match"] / denom if denom > 0 else 0.0
-    return float(score * 100.0)
-
-
-def batch_pbma(
-    pred_seqs: List[List[int]],
-    ref_seqs: List[List[int]],
-) -> float:
-    """
-    计算一个 batch 的 PBMA（按参考长度加权）
-    pred_seqs/ref_seqs: list[list[int]]，标签 1..4
-    """
-    assert len(pred_seqs) == len(ref_seqs)
-    total_match = 0
-    total_ref = 0
-    for p_ids, r_ids in zip(pred_seqs, ref_seqs):
-        p_str = _ids_to_bases(p_ids, drop_blank=True)
-        r_str = _ids_to_bases(r_ids, drop_blank=True)
-        match, ref_len = _pbma_counts(p_str, r_str)
-        total_match += match
-        total_ref += ref_len
-    return float(total_match) / float(total_ref) if total_ref > 0 else 0.0
+        accuracy = counts['='] / (counts['='] + counts['I'] + counts['X'] + counts['D'])
+    return accuracy * 100
 
 
 def batch_bonito_accuracy(
@@ -318,6 +153,7 @@ def batch_bonito_accuracy(
         r_str = _ids_to_bases(r_ids, drop_blank=True)
         scores.append(cal_bonito_accuracy(p_str, r_str, balanced=balanced, min_coverage=min_coverage))
     return float(np.mean(scores)) if scores else 0.0
+    
 
 
 # ---------------- 曲线绘图 & metrics 保存 ----------------
