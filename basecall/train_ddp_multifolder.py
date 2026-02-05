@@ -525,8 +525,8 @@ def parse_args():
     p.add_argument("--batch_size", type=int, default=128)
     p.add_argument("--num_epochs", type=int, default=50)
     p.add_argument("--num_workers", type=int, default=4)
-    p.add_argument("--quick_train", action="store_true",
-                   help="Quick train mode: freeze backbone and force ctc_crf_state_len=5 (5120 classes).")
+    p.add_argument("--quick", action="store_true",
+                   help="Quick mode alias: freeze backbone + ctc_crf_state_len=5 + ctc_crf_blank_score=2 + head_output_scale=5 + head_output_activation=tanh.")
 
     p.add_argument("--lr", type=float, default=3e-4)
     p.add_argument("--weight_decay", type=float, default=1e-3)
@@ -581,16 +581,19 @@ def parse_args():
 
 # -------------------- main --------------------
 
-def apply_quick_train_overrides(args) -> None:
-    if not args.quick_train:
+def apply_quick_overrides(args) -> None:
+    if not args.quick:
         return
     args.freeze_backbone = True
     args.ctc_crf_state_len = 5
+    args.ctc_crf_blank_score = 2.0
+    args.head_output_scale = 5.0
+    args.head_output_activation = "tanh"
 
 
 def main():
     args = parse_args()
-    apply_quick_train_overrides(args)
+    apply_quick_overrides(args)
     rank, world_size, local_rank, device, ddp_enabled = init_distributed()
 
     seed_everything(args.seed + rank)
@@ -600,8 +603,8 @@ def main():
     if is_main_process(rank):
         logger.info(f"[DDP] world_size={world_size}, rank={rank}, local_rank={local_rank}, device={device}")
         logger.info(f"[Args] {vars(args)}")
-        if args.quick_train:
-            logger.info("[Quick Train] enabled: freeze_backbone=True, ctc_crf_state_len=5 (5120 classes)")
+        if args.quick:
+            logger.info("[Quick] enabled: freeze_backbone=True, ctc_crf_state_len=5, ctc_crf_blank_score=2, head_output_scale=5, head_output_activation=tanh")
 
     # ---- model (先建模型拿 tokenizer，保持原数据逻辑) ----
     import os as _os

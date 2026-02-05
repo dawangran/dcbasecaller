@@ -70,6 +70,24 @@ basecall-train \
   --output_dir outputs
 ```
 
+### Quick run (Bonito-style CRF settings)
+
+```bash
+basecall-train \
+  --jsonl_paths /path/to/data \
+  --model_name_or_path <hf-model> \
+  --quick \
+  --output_dir outputs_quick
+```
+
+`--quick` expands to:
+- `--freeze_backbone`
+- `--ctc_crf_state_len 5`
+- `--ctc_crf_blank_score 2`
+- `--head_output_scale 5`
+- `--head_output_activation tanh`
+
+
 ### Use explicit train/val/test folders (skip auto split, jsonl.gz)
 
 ```bash
@@ -252,6 +270,13 @@ basecall-infer \
 - Overlap trimming follows chunk boundaries: each chunk keeps the non-overlap core based on `--max_tokens` and `--overlap`.
 
 ---
+
+## 4.1) Loss and accuracy definitions
+
+- **Training loss** uses Bonito-style CTC-CRF negative log-likelihood (`ctc_crf_loss`) on packed targets with per-read `input_lengths` (derived from `attention_mask`).
+- **Validation/Test accuracy (`acc`)** is Bonito-style alignment accuracy from `koi_beam_search_decode` + parasail alignment (`batch_bonito_accuracy`, unit: %).
+- **Balanced accuracy** (`--acc_balanced`) uses `(match - ins) / (match + mismatch + del)`; default uses `match / (match + ins + mismatch + del)`.
+- **CRF decode accuracy (`crf_acc`)** is reported from Viterbi decoding (`ctc_crf.decode`) and uses the same Bonito accuracy function.
 
 ## 5) Notes
 
