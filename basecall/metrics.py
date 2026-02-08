@@ -138,6 +138,25 @@ def cal_bonito_accuracy(pred_seq, ref_seq, balanced=False, min_coverage=0.0):
     return accuracy * 100
 
 
+def parasail_error_counts(pred_seq: str, ref_seq: str) -> Dict[str, int]:
+    """
+    Return cigar-derived counts from parasail alignment using the same rules as cal_bonito_accuracy.
+    """
+    counts = defaultdict(int)
+    if len(ref_seq) == 0:
+        return {"match": 0, "mismatch": 0, "ins": 0, "del": 0}
+    alignment = parasail.sw_trace_striped_32(pred_seq, ref_seq, 8, 4, parasail.dnafull)
+    _, cigar = parasail_to_sam(alignment, pred_seq)
+    for count, op in re.findall(_SPLIT_CIGAR, cigar):
+        counts[op] += int(count)
+    return {
+        "match": int(counts.get("=", 0)),
+        "mismatch": int(counts.get("X", 0)),
+        "ins": int(counts.get("I", 0)),
+        "del": int(counts.get("D", 0)),
+    }
+
+
 def batch_bonito_accuracy(
     pred_seqs: List[List[int]],
     ref_seqs: List[List[int]],

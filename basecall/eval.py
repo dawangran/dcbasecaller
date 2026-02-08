@@ -24,7 +24,6 @@ import json
 import os
 from typing import Dict, List, Tuple
 
-import edlib
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
@@ -38,7 +37,7 @@ from .data_multifolder import (
     create_collate_fn,
 )
 from .ctc_crf import decode as ctc_crf_decode
-from .metrics import koi_beam_search_decode, batch_bonito_accuracy, cal_bonito_accuracy
+from .metrics import koi_beam_search_decode, batch_bonito_accuracy, cal_bonito_accuracy, parasail_error_counts
 from .model import BasecallModel
 from .utils import ID2BASE, BLANK_IDX, seed_everything, infer_head_config_from_state_dict, resolve_input_lengths
 from .callback import plot_alignment_heatmap, plot_aligned_heatmap_png, align_sequences_indel_aware
@@ -58,20 +57,7 @@ def _parse_cigar(cigar: str) -> List[str]:
 
 
 def error_counts(pred_seq: str, ref_seq: str) -> Dict[str, int]:
-    result = edlib.align(pred_seq, ref_seq, task="path")
-    cigar = result.get("cigar", "")
-    ops = _parse_cigar(cigar) if cigar else []
-    counts = {"match": 0, "mismatch": 0, "ins": 0, "del": 0}
-    for op in ops:
-        if op in {"=", "M"}:
-            counts["match"] += 1
-        elif op == "X":
-            counts["mismatch"] += 1
-        elif op == "I":
-            counts["ins"] += 1
-        elif op == "D":
-            counts["del"] += 1
-    return counts
+    return parasail_error_counts(pred_seq, ref_seq)
 
 
 def merge_counts(total: Dict[str, int], item: Dict[str, int]) -> Dict[str, int]:
