@@ -157,6 +157,27 @@ def parasail_error_counts(pred_seq: str, ref_seq: str) -> Dict[str, int]:
     }
 
 
+def parasail_match_vector(pred_seq: str, ref_seq: str) -> List[int]:
+    """
+    Build a reference-coordinate match vector (1=match, 0=mismatch/delete) from parasail CIGAR.
+    Insertions and soft clips do not consume reference positions and are ignored.
+    """
+    if len(ref_seq) == 0:
+        return []
+    alignment = parasail.sw_trace_striped_32(pred_seq, ref_seq, 8, 4, parasail.dnafull)
+    _, cigar = parasail_to_sam(alignment, pred_seq)
+    match: List[int] = []
+    for count, op in re.findall(_SPLIT_CIGAR, cigar):
+        span = int(count)
+        if op == "=":
+            match.extend([1] * span)
+        elif op in {"X", "D"}:
+            match.extend([0] * span)
+        else:
+            continue
+    return match
+
+
 def batch_bonito_accuracy(
     pred_seqs: List[List[int]],
     ref_seqs: List[List[int]],
