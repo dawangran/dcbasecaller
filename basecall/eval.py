@@ -229,6 +229,7 @@ def _ctc_crf_decode_batch(
     logits_tbc: torch.Tensor,
     input_lengths: torch.Tensor,
 ) -> List[List[int]]:
+    logits_tbc = logits_tbc.float()
     decoded: List[List[int]] = []
     for idx, step_len in enumerate(input_lengths.tolist()):
         if step_len <= 0:
