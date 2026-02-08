@@ -92,11 +92,21 @@ def _token_slice_to_base_idx(token_idx: int, token_len: int, base_len: int) -> i
 def _infer_crf_state_len(num_classes: int, n_base: int) -> int:
     if n_base <= 1:
         raise ValueError("Cannot infer CTC-CRF state_len with n_base <= 1.")
-    base = num_classes / (n_base + 1)
-    state_len = math.log(base, n_base)
-    if not math.isclose(state_len, round(state_len)):
-        raise ValueError("Unable to infer CTC-CRF state_len from num_classes and n_base.")
-    return int(round(state_len))
+    candidates = []
+    if num_classes % (n_base + 1) == 0:
+        base = num_classes / (n_base + 1)
+        state_len = math.log(base, n_base)
+        if math.isclose(state_len, round(state_len)):
+            candidates.append(int(round(state_len)))
+    base = math.log(num_classes, n_base) - 1
+    if math.isclose(base, round(base)):
+        candidates.append(int(round(base)))
+    if candidates:
+        return candidates[0]
+    raise ValueError(
+        "Unable to infer CTC-CRF state_len from num_classes and n_base. "
+        "Please pass --ctc_crf_state_len or set CTC_CRF_STATE_LEN."
+    )
 
 
 def _ctc_crf_decode_batch(
@@ -183,6 +193,8 @@ def main():
                     help="Reverse sequence output for Koi beam_search decoding.")
     ap.add_argument("--decoder", choices=["koi", "ctc_crf"], default="koi",
                     help="Decoder to use: koi beam search or CTC-CRF Viterbi.")
+    ap.add_argument("--ctc_crf_state_len", type=int, default=None,
+                    help="Override CTC-CRF state_len (default: infer from head or CTC_CRF_STATE_LEN env).")
     ap.add_argument("--beam_q", type=int, default=20)
     ap.add_argument("--batch_size", type=int, default=4)
     ap.add_argument("--max_tokens", type=int, default=2048)
@@ -214,7 +226,13 @@ def main():
     # load model
     n_base = len(ID2BASE) - 1
     if args.decoder == "ctc_crf":
-        state_len = _infer_crf_state_len(head_config["num_classes"], n_base)
+        state_len = args.ctc_crf_state_len
+        if state_len is None:
+            env_state_len = os.environ.get("CTC_CRF_STATE_LEN")
+            if env_state_len is not None:
+                state_len = int(env_state_len)
+        if state_len is None:
+            state_len = _infer_crf_state_len(head_config["num_classes"], n_base)
         os.environ["CTC_CRF_STATE_LEN"] = str(state_len)
     model = BasecallModel(
         model_path=args.model_name_or_path,
