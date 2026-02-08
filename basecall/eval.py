@@ -190,7 +190,7 @@ def collect_deletion_positions(true_seq: str, pred_seq: str, out: List[float]) -
 
 
 def load_checkpoint_state(path: str) -> Dict[str, torch.Tensor]:
-    state = torch.load(path, map_location="cpu")
+    state = torch.load(path, map_location="cpu", weights_only=True)
     if isinstance(state, dict):
         for key in ("model_state_dict", "state_dict", "model"):
             if key in state and isinstance(state[key], dict):
@@ -311,8 +311,8 @@ def main() -> None:
     state_dict = load_checkpoint_state(args.ckpt)
     head_config = infer_head_config_from_state_dict(state_dict)
     n_base = len(ID2BASE) - 1
+    state_len = args.ctc_crf_state_len
     if args.decoder == "ctc_crf":
-        state_len = args.ctc_crf_state_len
         if state_len is None:
             env_state_len = os.environ.get("CTC_CRF_STATE_LEN")
             if env_state_len is not None:
@@ -328,6 +328,7 @@ def main() -> None:
         head_output_scale=args.head_output_scale,
         head_crf_blank_score=float(args.koi_blank_score),
         head_crf_n_base=n_base,
+        head_crf_state_len=state_len,
         head_crf_expand_blanks=True,
     ).to(device)
     model.load_state_dict(state_dict, strict=False)

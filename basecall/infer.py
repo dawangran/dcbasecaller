@@ -209,7 +209,7 @@ def main():
     seed_everything(42)
     device = torch.device(args.device)
     use_amp = args.amp and device.type == "cuda"
-    state = torch.load(args.ckpt, map_location="cpu")
+    state = torch.load(args.ckpt, map_location="cpu", weights_only=True)
     # 兼容 ckpt 格式：{"model": ...} / {"model_state_dict": ...} / {"state_dict": ...} / 直接 state_dict
     if isinstance(state, dict):
         if "model" in state:
@@ -225,8 +225,8 @@ def main():
     head_config = infer_head_config_from_state_dict(sd)
     # load model
     n_base = len(ID2BASE) - 1
+    state_len = args.ctc_crf_state_len
     if args.decoder == "ctc_crf":
-        state_len = args.ctc_crf_state_len
         if state_len is None:
             env_state_len = os.environ.get("CTC_CRF_STATE_LEN")
             if env_state_len is not None:
@@ -242,6 +242,7 @@ def main():
         head_output_scale=args.head_output_scale,
         head_crf_blank_score=float(args.koi_blank_score),
         head_crf_n_base=n_base,
+        head_crf_state_len=state_len,
         head_crf_expand_blanks=True,
     ).to(device)
     model.load_state_dict(sd, strict=False)
