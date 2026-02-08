@@ -8,6 +8,7 @@
 #   --amp
 
 import argparse
+import math
 import json
 import os
 import gzip
@@ -16,8 +17,9 @@ from typing import List, Tuple, Iterable
 import torch
 from tqdm import tqdm
 
+from .ctc_crf import decode as ctc_crf_decode
 from .model import BasecallModel
-from .utils import ID2BASE, seed_everything, resolve_input_lengths, infer_head_config_from_state_dict
+from .utils import ID2BASE, BLANK_IDX, seed_everything, resolve_input_lengths, infer_head_config_from_state_dict
 from .metrics import koi_beam_search_decode
 
 def _phred_to_char(q: int) -> str:
@@ -87,6 +89,43 @@ def _token_slice_to_base_idx(token_idx: int, token_len: int, base_len: int) -> i
     return int(round(token_idx * base_len / token_len))
 
 
+def _infer_crf_state_len(num_classes: int, n_base: int) -> int:
+    if n_base <= 1:
+        raise ValueError("Cannot infer CTC-CRF state_len with n_base <= 1.")
+    candidates = []
+    if num_classes % (n_base + 1) == 0:
+        base = num_classes / (n_base + 1)
+        state_len = math.log(base, n_base)
+        if math.isclose(state_len, round(state_len)):
+            candidates.append(int(round(state_len)))
+    base = math.log(num_classes, n_base) - 1
+    if math.isclose(base, round(base)):
+        candidates.append(int(round(base)))
+    if candidates:
+        return candidates[0]
+    raise ValueError(
+        "Unable to infer CTC-CRF state_len from num_classes and n_base. "
+        "Please pass --ctc_crf_state_len or set CTC_CRF_STATE_LEN."
+    )
+
+
+def _ctc_crf_decode_batch(
+    logits_tbc: torch.Tensor,
+    input_lengths: torch.Tensor,
+) -> List[List[int]]:
+    logits_tbc = logits_tbc.float()
+    decoded: List[List[int]] = []
+    for idx, step_len in enumerate(input_lengths.tolist()):
+        if step_len <= 0:
+            decoded.append([])
+            continue
+        sample_logits = logits_tbc[:step_len, idx : idx + 1, :]
+        decoded_ids = ctc_crf_decode(sample_logits, blank_idx=BLANK_IDX)[0]
+        decoded_len = min(len(decoded_ids), step_len)
+        decoded.append(decoded_ids[:decoded_len])
+    return decoded
+
+
 def stitch_sequences(
     chunk_seqs: List[str],
     chunk_qs: List[str],
@@ -153,6 +192,10 @@ def main():
                     help="Blank score used for Koi beam_search decoding.")
     ap.add_argument("--koi_reverse", action="store_true",
                     help="Reverse sequence output for Koi beam_search decoding.")
+    ap.add_argument("--decoder", choices=["koi", "ctc_crf"], default="koi",
+                    help="Decoder to use: koi beam search or CTC-CRF Viterbi.")
+    ap.add_argument("--ctc_crf_state_len", type=int, default=None,
+                    help="Override CTC-CRF state_len (default: infer from head or CTC_CRF_STATE_LEN env).")
     ap.add_argument("--beam_q", type=int, default=20)
     ap.add_argument("--batch_size", type=int, default=4)
     ap.add_argument("--max_tokens", type=int, default=2048)
@@ -167,7 +210,7 @@ def main():
     seed_everything(42)
     device = torch.device(args.device)
     use_amp = args.amp and device.type == "cuda"
-    state = torch.load(args.ckpt, map_location="cpu")
+    state = torch.load(args.ckpt, map_location="cpu", weights_only=True)
     # 兼容 ckpt 格式：{"model": ...} / {"model_state_dict": ...} / {"state_dict": ...} / 直接 state_dict
     if isinstance(state, dict):
         if "model" in state:
@@ -183,6 +226,15 @@ def main():
     head_config = infer_head_config_from_state_dict(sd)
     # load model
     n_base = len(ID2BASE) - 1
+    state_len = args.ctc_crf_state_len
+    if args.decoder == "ctc_crf":
+        if state_len is None:
+            env_state_len = os.environ.get("CTC_CRF_STATE_LEN")
+            if env_state_len is not None:
+                state_len = int(env_state_len)
+        if state_len is None:
+            state_len = _infer_crf_state_len(head_config["num_classes"], n_base)
+        os.environ["CTC_CRF_STATE_LEN"] = str(state_len)
     model = BasecallModel(
         model_path=args.model_name_or_path,
         num_classes=head_config["num_classes"],
@@ -191,6 +243,7 @@ def main():
         head_output_scale=args.head_output_scale,
         head_crf_blank_score=float(args.koi_blank_score),
         head_crf_n_base=n_base,
+        head_crf_state_len=state_len,
         head_crf_expand_blanks=True,
     ).to(device)
     model.load_state_dict(sd, strict=False)
@@ -227,16 +280,19 @@ def main():
                     logits_btc = model(input_ids, attention_mask=attention_mask)  # [B,T,C]
 
                 logits_tbc = logits_btc.transpose(0, 1)
-                pred_ids = koi_beam_search_decode(
-                    logits_tbc,
-                    beam_width=args.beam_width,
-                    beam_cut=args.koi_beam_cut,
-                    scale=args.koi_scale,
-                    offset=args.koi_offset,
-                    blank_score=args.koi_blank_score,
-                    reverse=args.koi_reverse,
-                    input_lengths=input_lengths,
-                )
+                if args.decoder == "ctc_crf":
+                    pred_ids = _ctc_crf_decode_batch(logits_tbc, input_lengths)
+                else:
+                    pred_ids = koi_beam_search_decode(
+                        logits_tbc,
+                        beam_width=args.beam_width,
+                        beam_cut=args.koi_beam_cut,
+                        scale=args.koi_scale,
+                        offset=args.koi_offset,
+                        blank_score=args.koi_blank_score,
+                        reverse=args.koi_reverse,
+                        input_lengths=input_lengths,
+                    )
                 for ids in pred_ids:
                     seq = "".join(ID2BASE.get(i, "N") for i in ids)
                     qstring = _constant_qstring(len(seq), args.beam_q)
