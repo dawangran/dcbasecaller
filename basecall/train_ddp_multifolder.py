@@ -27,7 +27,7 @@ from typing import Tuple, Optional, Any, Dict, List
 import numpy as np
 
 import torch
-from torch.cuda.amp import autocast, GradScaler
+from torch.amp import autocast, GradScaler
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
@@ -261,6 +261,7 @@ def train_one_epoch(
     ctc_crf_blank_score: float,
     use_amp: bool,
     scaler: GradScaler,
+    clip_grad_norm: float,
 ):
     model.train()
     total_loss, n_batches = 0.0, 0
@@ -283,7 +284,7 @@ def train_one_epoch(
         attention_mask = batch.get("attention_mask", None)
         if attention_mask is not None:
             attention_mask = attention_mask.to(device)
-        with autocast(enabled=use_amp):
+        with autocast(device.type, enabled=use_amp):
             logits_btc = model(input_ids, attention_mask=attention_mask)
             logits_tbc = logits_btc.transpose(0, 1)    # [T,B,C]
             loss = ctc_crf_loss(
@@ -296,10 +297,15 @@ def train_one_epoch(
         if torch.isfinite(loss):
             if use_amp:
                 scaler.scale(loss).backward()
+                scaler.unscale_(optimizer)
+                if clip_grad_norm > 0:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), clip_grad_norm)
                 scaler.step(optimizer)
                 scaler.update()
             else:
                 loss.backward()
+                if clip_grad_norm > 0:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), clip_grad_norm)
                 optimizer.step()
             if scheduler is not None:
                 scheduler.step()
@@ -327,9 +333,11 @@ def eval_one_epoch(
     rank: int,
     split_name: str,
     ctc_crf_blank_score: float,
+    koi_blank_score: float,
     acc_balanced: bool,
     acc_min_coverage: float,
     use_amp: bool,
+    decoder_mode: str,
 ) -> Tuple[float, float, float, float, float, float]:
     model.eval()
     total_loss, n_batches = 0.0, 0
@@ -355,7 +363,7 @@ def eval_one_epoch(
         attention_mask = batch.get("attention_mask", None)
         if attention_mask is not None:
             attention_mask = attention_mask.to(device)
-        with autocast(enabled=use_amp):
+        with autocast(device.type, enabled=use_amp):
             logits_btc = model(input_ids, attention_mask=attention_mask)
 
         # logits_btc = model(input_ids)              # [B,T,C]
@@ -371,11 +379,26 @@ def eval_one_epoch(
         
         total_loss += float(loss.item())
         n_batches += 1
-        pred_seqs = koi_beam_search_decode(
-            logits_tbc,
-            blank_score=float(ctc_crf_blank_score),
-            input_lengths=input_lengths,
-        )
+        input_len_list = input_lengths.detach().cpu().tolist()
+        if decoder_mode == "koi":
+            pred_seqs = koi_beam_search_decode(
+                logits_tbc,
+                blank_score=float(koi_blank_score),
+                input_lengths=input_lengths,
+            )
+        else:
+            pred_seqs = []
+            for idx, input_len in enumerate(input_len_list):
+                step_len = int(input_len)
+                if step_len <= 0:
+                    pred_seqs.append([])
+                    continue
+                decoded_ids = ctc_crf_decode(
+                    logits_tbc[:step_len, idx : idx + 1, :].float(),
+                    blank_idx=BLANK_IDX,
+                )[0]
+                pred_seqs.append(decoded_ids[:step_len])
+
         acc = batch_bonito_accuracy(
             pred_seqs,
             batch["target_seqs"],
@@ -384,21 +407,16 @@ def eval_one_epoch(
         )
         total_acc += float(acc)
         n_acc += 1
-        input_len_list = input_lengths.detach().cpu().tolist()
-        crf_decoded = []
-        for idx, (r_ids, input_len) in enumerate(zip(batch["target_seqs"], input_len_list)):
+
+        for r_ids, pred_ids, input_len in zip(batch["target_seqs"], pred_seqs, input_len_list):
             step_len = int(input_len)
             if step_len <= 0:
                 blank_ratios.append(1.0)
                 nonzero_lengths.append(0.0)
-                ref_len = max(len(r_ids), 1)
                 total_cov += 0.0
                 n_cov += 1
-                crf_decoded.append([])
                 continue
-            decoded_ids = ctc_crf_decode(logits_tbc[:step_len, idx : idx + 1, :], blank_idx=BLANK_IDX)[0]
-            decoded_len = min(len(decoded_ids), step_len)
-            crf_decoded.append(decoded_ids[:decoded_len])
+            decoded_len = min(len(pred_ids), step_len)
             blank_ratio = max(1.0 - (decoded_len / max(step_len, 1)), 0.0)
             blank_ratios.append(blank_ratio)
             nonzero_len = float(decoded_len)
@@ -406,14 +424,9 @@ def eval_one_epoch(
             ref_len = max(len(r_ids), 1)
             total_cov += nonzero_len / ref_len
             n_cov += 1
-        crf_acc = batch_bonito_accuracy(
-            crf_decoded,
-            batch["target_seqs"],
-            balanced=acc_balanced,
-            min_coverage=acc_min_coverage,
-        )
-        total_crf_acc += float(crf_acc)
-        n_crf_acc += 1
+
+        total_crf_acc += float(acc) if decoder_mode == "ctc_crf" else 0.0
+        n_crf_acc += 1 if decoder_mode == "ctc_crf" else 0
 
     avg_loss = total_loss / max(n_batches, 1)
     avg_acc = total_acc / max(n_acc, 1)
@@ -581,10 +594,16 @@ def parse_args():
                    help="Use Bonito balanced accuracy: (match - ins) / (match + mismatch + del).")
     p.add_argument("--acc_min_coverage", type=float, default=0.0,
                    help="Minimum reference coverage required to count a read for accuracy.")
+    p.add_argument("--train_decoder", choices=["ctc_crf", "koi"], default="ctc_crf",
+                   help="Decoder used for accuracy/blank metrics: ctc_crf (fp32) or koi (fp16).")
     p.add_argument("--ctc_crf_state_len", type=int, default=5,
                    help="State length for Bonito CTC-CRF (used to set output classes).")
     p.add_argument("--ctc_crf_blank_score", type=float, default=2.0,
                    help="Fixed blank score for CTC-CRF (blank is not trained).")
+    p.add_argument("--koi_blank_score", type=float, default=2.0,
+                   help="Blank score used by koi beam search decoder.")
+    p.add_argument("--clip_grad_norm", type=float, default=2.0,
+                   help="Clip gradient norm before optimizer step (0 to disable).")
 
 
     return p.parse_args()
@@ -598,6 +617,7 @@ def apply_quick_overrides(args) -> None:
     args.freeze_backbone = True
     args.ctc_crf_state_len = 5
     args.ctc_crf_blank_score = 2.0
+    args.koi_blank_score = 2.0
     args.head_output_scale = 5.0
     args.head_output_activation = "tanh"
 
@@ -812,7 +832,16 @@ def main():
 
     # if resuming mid-run, you may want to pad arrays; we keep it simple:
     # curves will reflect only epochs run in this session.
-    use_amp = bool((args.amp or args.force_fp16) and device.type == "cuda")
+    if args.train_decoder == "ctc_crf":
+        use_amp = False
+        if (args.amp or args.force_fp16) and is_main_process(rank):
+            logger.info("[AMP] Disabled for ctc_crf decoder (requires fp32).")
+    else:
+        use_amp = device.type == "cuda"
+        if device.type != "cuda" and is_main_process(rank):
+            logger.warning("[AMP] koi decoder selected but CUDA not available; running in fp32.")
+    if is_main_process(rank):
+        logger.info(f"[Decoder] mode={args.train_decoder} use_amp={use_amp}")
     scaler = GradScaler(enabled=use_amp)
 
     for epoch in range(start_epoch, args.num_epochs + 1):
@@ -831,6 +860,7 @@ def main():
             args.ctc_crf_blank_score,
             use_amp,
             scaler,
+            args.clip_grad_norm,
         )
         train_losses.append(tr_loss)
 
@@ -848,30 +878,38 @@ def main():
                 rank,
                 "val",
                 args.ctc_crf_blank_score,
+                args.koi_blank_score,
                 args.acc_balanced,
                 args.acc_min_coverage,
                 use_amp,
+                args.train_decoder,
             )
             val_losses.append(val_loss)
             val_accs.append(val_acc)
 
             if is_main_process(rank):
-                logger.info(
-                    f"[Val] epoch={epoch} loss={val_loss:.4f} acc={val_acc:.4f} crf_acc={val_crf_acc:.4f} "
-                    f"coverage={val_cov:.4f} blank={val_blank:.4f} nonzero_len={val_nonzero_len:.2f}"
-                )
-                if use_wandb and wandb is not None:
-                    wandb.log(
-                        {
-                            "val/loss": float(val_loss),
-                            "val/acc": float(val_acc),
-                            "val/crf_acc": float(val_crf_acc),
-                            "val/coverage": float(val_cov),
-                            "val/blank": float(val_blank),
-                            "val/nonzero_len": float(val_nonzero_len),
-                            "epoch": epoch,
-                        }
+                if args.train_decoder == "ctc_crf":
+                    logger.info(
+                        f"[Val] epoch={epoch} loss={val_loss:.4f} acc={val_acc:.4f} crf_acc={val_crf_acc:.4f} "
+                        f"coverage={val_cov:.4f} blank={val_blank:.4f} nonzero_len={val_nonzero_len:.2f}"
                     )
+                else:
+                    logger.info(
+                        f"[Val] epoch={epoch} loss={val_loss:.4f} acc={val_acc:.4f} "
+                        f"coverage={val_cov:.4f} blank={val_blank:.4f} nonzero_len={val_nonzero_len:.2f}"
+                    )
+                if use_wandb and wandb is not None:
+                    payload = {
+                        "val/loss": float(val_loss),
+                        "val/acc": float(val_acc),
+                        "val/coverage": float(val_cov),
+                        "val/blank": float(val_blank),
+                        "val/nonzero_len": float(val_nonzero_len),
+                        "epoch": epoch,
+                    }
+                    if args.train_decoder == "ctc_crf":
+                        payload["val/crf_acc"] = float(val_crf_acc)
+                    wandb.log(payload)
 
         # ---- checkpoint save ----
         if is_main_process(rank) and (epoch % max(args.save_every, 1) == 0):
@@ -914,26 +952,34 @@ def main():
             rank,
             "test",
             args.ctc_crf_blank_score,
+            args.koi_blank_score,
             args.acc_balanced,
             args.acc_min_coverage,
             use_amp,
+            args.train_decoder,
         )
         if is_main_process(rank):
-            logger.info(
-                f"[Test] loss={test_loss:.4f} acc={test_acc:.4f} crf_acc={test_crf_acc:.4f} "
-                f"coverage={test_cov:.4f} blank={test_blank:.4f} nonzero_len={test_nonzero_len:.2f}"
-            )
-            if use_wandb and wandb is not None:
-                wandb.log(
-                    {
-                        "test/loss": float(test_loss),
-                        "test/acc": float(test_acc),
-                        "test/crf_acc": float(test_crf_acc),
-                        "test/coverage": float(test_cov),
-                        "test/blank": float(test_blank),
-                        "test/nonzero_len": float(test_nonzero_len),
-                    }
+            if args.train_decoder == "ctc_crf":
+                logger.info(
+                    f"[Test] loss={test_loss:.4f} acc={test_acc:.4f} crf_acc={test_crf_acc:.4f} "
+                    f"coverage={test_cov:.4f} blank={test_blank:.4f} nonzero_len={test_nonzero_len:.2f}"
                 )
+            else:
+                logger.info(
+                    f"[Test] loss={test_loss:.4f} acc={test_acc:.4f} "
+                    f"coverage={test_cov:.4f} blank={test_blank:.4f} nonzero_len={test_nonzero_len:.2f}"
+                )
+            if use_wandb and wandb is not None:
+                payload = {
+                    "test/loss": float(test_loss),
+                    "test/acc": float(test_acc),
+                    "test/coverage": float(test_cov),
+                    "test/blank": float(test_blank),
+                    "test/nonzero_len": float(test_nonzero_len),
+                }
+                if args.train_decoder == "ctc_crf":
+                    payload["test/crf_acc"] = float(test_crf_acc)
+                wandb.log(payload)
 
     # ---- final save curves/csv ----
     if is_main_process(rank):
@@ -954,7 +1000,7 @@ def main():
             if attention_mask is not None:
                 attention_mask = attention_mask.to(device)
             with torch.no_grad():
-                with autocast(enabled=use_amp):
+                with autocast(device.type, enabled=use_amp):
                     logits_btc = model(input_ids, attention_mask=attention_mask)
                 logits_tbc = logits_btc.transpose(0, 1)
             input_lengths = resolve_input_lengths(
@@ -962,11 +1008,25 @@ def main():
                 attention_mask=attention_mask,
                 input_lengths=batch.get("input_lengths"),
             )
-            pred_seqs = koi_beam_search_decode(
-                logits_tbc,
-                blank_score=float(args.ctc_crf_blank_score),
-                input_lengths=input_lengths,
-            )
+            if args.train_decoder == "koi":
+                pred_seqs = koi_beam_search_decode(
+                    logits_tbc,
+                    blank_score=float(args.koi_blank_score),
+                    input_lengths=input_lengths,
+                )
+            else:
+                pred_seqs = []
+                input_len_list = input_lengths.detach().cpu().tolist()
+                for idx, input_len in enumerate(input_len_list):
+                    step_len = int(input_len)
+                    if step_len <= 0:
+                        pred_seqs.append([])
+                        continue
+                    decoded_ids = ctc_crf_decode(
+                        logits_tbc[:step_len, idx : idx + 1, :].float(),
+                        blank_idx=BLANK_IDX,
+                    )[0]
+                    pred_seqs.append(decoded_ids[:step_len])
             ref_seqs = batch["target_seqs"]
             fig = plot_alignment_heatmap(pred_seqs, ref_seqs, max_reads=32, max_len=80)
             wandb.log({"final/base_alignment": wandb.Image(fig)})
