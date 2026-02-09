@@ -553,6 +553,8 @@ def parse_args():
                    help="Enable DDP unused parameter detection (fix reduction error).")
     p.add_argument("--amp", action="store_true",
                    help="Enable mixed precision (AMP) training on CUDA.")
+    p.add_argument("--force_fp16", action="store_true",
+                   help="Force AMP on CUDA regardless of --amp flag.")
 
     # ✅ save frequency controls (minimal)
     p.add_argument("--save_every", type=int, default=1,
@@ -810,7 +812,7 @@ def main():
 
     # if resuming mid-run, you may want to pad arrays; we keep it simple:
     # curves will reflect only epochs run in this session.
-    use_amp = bool(args.amp and device.type == "cuda")
+    use_amp = bool((args.amp or args.force_fp16) and device.type == "cuda")
     scaler = GradScaler(enabled=use_amp)
 
     for epoch in range(start_epoch, args.num_epochs + 1):
