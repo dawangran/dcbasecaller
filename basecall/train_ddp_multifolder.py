@@ -567,8 +567,6 @@ def parse_args():
                    help="Reinitialize backbone weights for ablation (ignores pretrained backbone init).")
     p.add_argument("--unfreeze_last_n_layers", type=int, default=0,
                    help="Unfreeze only the last N backbone layers (default: 0).")
-    p.add_argument("--unfreeze_all_layers", action="store_true",
-                   help="Unfreeze all backbone layers (overrides freeze/unfreeze range settings).")
     p.add_argument("--unfreeze_layer_start", type=int, default=None,
                    help="Unfreeze backbone layers in [start, end). Optional finer control.")
     p.add_argument("--unfreeze_layer_end", type=int, default=None,
@@ -604,19 +602,9 @@ def apply_quick_overrides(args) -> None:
     args.head_output_activation = "tanh"
 
 
-def apply_unfreeze_overrides(args) -> None:
-    if not args.unfreeze_all_layers:
-        return
-    args.freeze_backbone = False
-    args.unfreeze_last_n_layers = 0
-    args.unfreeze_layer_start = 0
-    args.unfreeze_layer_end = None
-
-
 def main():
     args = parse_args()
     apply_quick_overrides(args)
-    apply_unfreeze_overrides(args)
     rank, world_size, local_rank, device, ddp_enabled = init_distributed()
 
     seed_everything(args.seed + rank)
@@ -628,8 +616,6 @@ def main():
         logger.info(f"[Args] {vars(args)}")
         if args.quick:
             logger.info("[Quick] enabled: freeze_backbone=True, ctc_crf_state_len=5, ctc_crf_blank_score=2, head_output_scale=5, head_output_activation=tanh")
-        if args.unfreeze_all_layers:
-            logger.info("[Unfreeze] enabled: unfreeze_all_layers=True (backbone fully trainable)")
 
     # ---- model (先建模型拿 tokenizer，保持原数据逻辑) ----
     import os as _os
