@@ -27,6 +27,7 @@ from typing import Tuple, Optional, Any, Dict, List
 import numpy as np
 
 import torch
+from torch.cuda.amp import autocast, GradScaler
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
@@ -258,6 +259,8 @@ def train_one_epoch(
     log_interval: int,
     use_wandb: bool,
     ctc_crf_blank_score: float,
+    use_amp: bool,
+    scaler: GradScaler,
 ):
     model.train()
     total_loss, n_batches = 0.0, 0
@@ -280,22 +283,24 @@ def train_one_epoch(
         attention_mask = batch.get("attention_mask", None)
         if attention_mask is not None:
             attention_mask = attention_mask.to(device)
-        logits_btc = model(input_ids, attention_mask=attention_mask)
-
-
-        # logits_btc = model(input_ids)              # [B,T,C]
-        logits_tbc = logits_btc.transpose(0, 1)    # [T,B,C]
-
-        loss = ctc_crf_loss(
-            logits_tbc,
-            target_labels,
-            input_lengths,
-            target_lengths,
-            blank_idx=BLANK_IDX,
-        )
+        with autocast(enabled=use_amp):
+            logits_btc = model(input_ids, attention_mask=attention_mask)
+            logits_tbc = logits_btc.transpose(0, 1)    # [T,B,C]
+            loss = ctc_crf_loss(
+                logits_tbc,
+                target_labels,
+                input_lengths,
+                target_lengths,
+                blank_idx=BLANK_IDX,
+            )
         if torch.isfinite(loss):
-            loss.backward()
-            optimizer.step()
+            if use_amp:
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                loss.backward()
+                optimizer.step()
             if scheduler is not None:
                 scheduler.step()
 
@@ -324,6 +329,7 @@ def eval_one_epoch(
     ctc_crf_blank_score: float,
     acc_balanced: bool,
     acc_min_coverage: float,
+    use_amp: bool,
 ) -> Tuple[float, float, float, float, float, float]:
     model.eval()
     total_loss, n_batches = 0.0, 0
@@ -349,7 +355,8 @@ def eval_one_epoch(
         attention_mask = batch.get("attention_mask", None)
         if attention_mask is not None:
             attention_mask = attention_mask.to(device)
-        logits_btc = model(input_ids, attention_mask=attention_mask)
+        with autocast(enabled=use_amp):
+            logits_btc = model(input_ids, attention_mask=attention_mask)
 
         # logits_btc = model(input_ids)              # [B,T,C]
         logits_tbc = logits_btc.transpose(0, 1)    # [T,B,C]
@@ -544,6 +551,8 @@ def parse_args():
 
     p.add_argument("--find_unused_parameters", action="store_true",
                    help="Enable DDP unused parameter detection (fix reduction error).")
+    p.add_argument("--amp", action="store_true",
+                   help="Enable mixed precision (AMP) training on CUDA.")
 
     # ✅ save frequency controls (minimal)
     p.add_argument("--save_every", type=int, default=1,
@@ -801,6 +810,9 @@ def main():
 
     # if resuming mid-run, you may want to pad arrays; we keep it simple:
     # curves will reflect only epochs run in this session.
+    use_amp = bool(args.amp and device.type == "cuda")
+    scaler = GradScaler(enabled=use_amp)
+
     for epoch in range(start_epoch, args.num_epochs + 1):
         if train_sampler is not None:
             train_sampler.set_epoch(epoch)
@@ -815,6 +827,8 @@ def main():
             args.log_interval,
             use_wandb,
             args.ctc_crf_blank_score,
+            use_amp,
+            scaler,
         )
         train_losses.append(tr_loss)
 
@@ -834,6 +848,7 @@ def main():
                 args.ctc_crf_blank_score,
                 args.acc_balanced,
                 args.acc_min_coverage,
+                use_amp,
             )
             val_losses.append(val_loss)
             val_accs.append(val_acc)
@@ -899,6 +914,7 @@ def main():
             args.ctc_crf_blank_score,
             args.acc_balanced,
             args.acc_min_coverage,
+            use_amp,
         )
         if is_main_process(rank):
             logger.info(
@@ -936,7 +952,8 @@ def main():
             if attention_mask is not None:
                 attention_mask = attention_mask.to(device)
             with torch.no_grad():
-                logits_btc = model(input_ids, attention_mask=attention_mask)
+                with autocast(enabled=use_amp):
+                    logits_btc = model(input_ids, attention_mask=attention_mask)
                 logits_tbc = logits_btc.transpose(0, 1)
             input_lengths = resolve_input_lengths(
                 input_ids,
