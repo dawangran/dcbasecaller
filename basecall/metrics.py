@@ -120,16 +120,14 @@ def cal_bonito_accuracy(pred_seq, ref_seq, balanced=False, min_coverage=0.0):
     if len(ref_seq) == 0:
         return 0.0
 
-    q_coverage = len(alignment.traceback.query) / max(len(pred_seq), 1)
-    r_coverage = len(alignment.traceback.ref) / max(len(ref_seq), 1)
-
-    if r_coverage < min_coverage:
-        return 0.0
-
     _, cigar = parasail_to_sam(alignment, pred_seq)
 
     for count, op in re.findall(_SPLIT_CIGAR, cigar):
         counts[op] += int(count)
+
+    r_coverage = (counts['='] + counts['X'] + counts['D']) / max(len(ref_seq), 1)
+    if r_coverage < min_coverage:
+        return 0.0
 
     if balanced:
         accuracy = (counts['='] - counts['I']) / (counts['='] + counts['X'] + counts['D'])
