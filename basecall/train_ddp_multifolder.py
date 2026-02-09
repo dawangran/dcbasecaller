@@ -566,8 +566,6 @@ def parse_args():
                    help="Enable DDP unused parameter detection (fix reduction error).")
     p.add_argument("--amp", action="store_true",
                    help="Enable mixed precision (AMP) training on CUDA.")
-    p.add_argument("--force_fp16", action="store_true",
-                   help="Force AMP on CUDA regardless of --amp flag.")
 
     # ✅ save frequency controls (minimal)
     p.add_argument("--save_every", type=int, default=1,
@@ -834,7 +832,7 @@ def main():
     # curves will reflect only epochs run in this session.
     if args.train_decoder == "ctc_crf":
         use_amp = False
-        if (args.amp or args.force_fp16) and is_main_process(rank):
+        if args.amp and is_main_process(rank):
             logger.info("[AMP] Disabled for ctc_crf decoder (requires fp32).")
     else:
         use_amp = device.type == "cuda"
