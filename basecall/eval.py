@@ -366,7 +366,7 @@ def main() -> None:
         if attention_mask is not None:
             attention_mask = attention_mask.to(device)
 
-        with torch.cuda.amp.autocast(enabled=use_amp):
+        with torch.amp.autocast(device_type=device.type, enabled=use_amp):
             logits_btc = model(input_ids, attention_mask=attention_mask)
 
         logits_tbc = logits_btc.transpose(0, 1)
