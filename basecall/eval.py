@@ -37,7 +37,7 @@ from .data_multifolder import (
     MultiNpySignalRefDataset,
     create_collate_fn,
 )
-from .metrics import koi_beam_search_decode, batch_bonito_accuracy, cal_bonito_accuracy
+from .metrics import koi_beam_search_decode, ctc_greedy_decode, batch_bonito_accuracy, cal_bonito_accuracy
 from .model import BasecallModel
 from .utils import ID2BASE, seed_everything, infer_head_config_from_state_dict, resolve_input_lengths
 from .callback import plot_alignment_heatmap, plot_aligned_heatmap_png, align_sequences_indel_aware
@@ -237,10 +237,21 @@ def main() -> None:
     ap.add_argument("--fastq_out", type=str, default=None)
     ap.add_argument("--fastq_q", type=int, default=20)
     ap.add_argument("--hidden_layer", type=int, default=-1)
+    ap.add_argument("--head_type", choices=["ctc", "ctc_crf", "auto"], default="auto")
     ap.add_argument("--head_output_activation", choices=["tanh", "relu"], default=None,
                     help="Optional activation applied to head output logits.")
     ap.add_argument("--head_output_scale", type=float, default=None,
                     help="Optional scalar applied to head output logits (after activation).")
+    ap.add_argument("--pre_ctc_module", choices=["none", "bilstm", "transformer"], default="none",
+                    help="Optional module before CTC-CRF head.")
+    ap.add_argument("--pre_ctc_transformer_nhead", type=int, default=8,
+                    help="Transformer pre-CTC attention heads.")
+    ap.add_argument("--pre_ctc_transformer_ffn_dim", type=int, default=None,
+                    help="Transformer pre-CTC FFN hidden dim (default 4*d_model).")
+    ap.add_argument("--pre_ctc_transformer_dropout", type=float, default=0.1,
+                    help="Transformer pre-CTC dropout.")
+    ap.add_argument("--pre_ctc_transformer_activation", choices=["relu", "gelu"], default="gelu",
+                    help="Transformer pre-CTC activation.")
     ap.add_argument("--acc_balanced", action="store_true",
                     help="Use Bonito balanced accuracy: (match - ins) / (match + mismatch + del).")
     ap.add_argument("--acc_min_coverage", type=float, default=0.0,
@@ -271,15 +282,22 @@ def main() -> None:
     state_dict = load_checkpoint_state(args.ckpt)
     head_config = infer_head_config_from_state_dict(state_dict)
     n_base = len(ID2BASE) - 1
+    head_type = head_config.get("head_type", "ctc_crf") if args.head_type == "auto" else args.head_type
     model = BasecallModel(
         model_path=args.model_name_or_path,
         num_classes=head_config["num_classes"],
         hidden_layer=args.hidden_layer,
+        head_type=head_type,
         head_output_activation=args.head_output_activation,
         head_output_scale=args.head_output_scale,
         head_crf_blank_score=float(args.koi_blank_score),
         head_crf_n_base=n_base,
         head_crf_expand_blanks=True,
+        pre_ctc_module=args.pre_ctc_module,
+        pre_ctc_transformer_nhead=args.pre_ctc_transformer_nhead,
+        pre_ctc_transformer_ffn_dim=args.pre_ctc_transformer_ffn_dim,
+        pre_ctc_transformer_dropout=args.pre_ctc_transformer_dropout,
+        pre_ctc_transformer_activation=args.pre_ctc_transformer_activation,
     ).to(device)
     model.load_state_dict(state_dict, strict=False)
     model.eval()
@@ -326,16 +344,23 @@ def main() -> None:
             attention_mask=attention_mask,
             input_lengths=batch.get("input_lengths"),
         )
-        pred_ids = koi_beam_search_decode(
-            logits_tbc,
-            beam_width=args.beam_width,
-            beam_cut=args.koi_beam_cut,
-            scale=args.koi_scale,
-            offset=args.koi_offset,
-            blank_score=args.koi_blank_score,
-            reverse=args.koi_reverse,
-            input_lengths=input_lengths,
-        )
+        if head_type == "ctc":
+            pred_ids = ctc_greedy_decode(
+                logits_tbc,
+                blank_idx=0,
+                input_lengths=input_lengths,
+            )
+        else:
+            pred_ids = koi_beam_search_decode(
+                logits_tbc,
+                beam_width=args.beam_width,
+                beam_cut=args.koi_beam_cut,
+                scale=args.koi_scale,
+                offset=args.koi_offset,
+                blank_score=args.koi_blank_score,
+                reverse=args.koi_reverse,
+                input_lengths=input_lengths,
+            )
         ref_ids = batch["target_seqs"]
 
         acc = batch_bonito_accuracy(

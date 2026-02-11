@@ -18,7 +18,7 @@ from tqdm import tqdm
 
 from .model import BasecallModel
 from .utils import ID2BASE, seed_everything, resolve_input_lengths, infer_head_config_from_state_dict
-from .metrics import koi_beam_search_decode
+from .metrics import koi_beam_search_decode, ctc_greedy_decode
 
 def _phred_to_char(q: int) -> str:
     # standard Sanger FASTQ (Phred+33)
@@ -158,10 +158,21 @@ def main():
     ap.add_argument("--max_tokens", type=int, default=2048)
     ap.add_argument("--overlap", type=int, default=128)
     ap.add_argument("--hidden_layer", type=int, default=-1)
+    ap.add_argument("--head_type", choices=["ctc", "ctc_crf", "auto"], default="auto")
     ap.add_argument("--head_output_activation", choices=["tanh", "relu"], default=None,
                     help="Optional activation applied to head output logits.")
     ap.add_argument("--head_output_scale", type=float, default=None,
                     help="Optional scalar applied to head output logits (after activation).")
+    ap.add_argument("--pre_ctc_module", choices=["none", "bilstm", "transformer"], default="none",
+                    help="Optional module before CTC-CRF head.")
+    ap.add_argument("--pre_ctc_transformer_nhead", type=int, default=8,
+                    help="Transformer pre-CTC attention heads.")
+    ap.add_argument("--pre_ctc_transformer_ffn_dim", type=int, default=None,
+                    help="Transformer pre-CTC FFN hidden dim (default 4*d_model).")
+    ap.add_argument("--pre_ctc_transformer_dropout", type=float, default=0.1,
+                    help="Transformer pre-CTC dropout.")
+    ap.add_argument("--pre_ctc_transformer_activation", choices=["relu", "gelu"], default="gelu",
+                    help="Transformer pre-CTC activation.")
     args = ap.parse_args()
 
     seed_everything(42)
@@ -183,15 +194,22 @@ def main():
     head_config = infer_head_config_from_state_dict(sd)
     # load model
     n_base = len(ID2BASE) - 1
+    head_type = head_config.get("head_type", "ctc_crf") if args.head_type == "auto" else args.head_type
     model = BasecallModel(
         model_path=args.model_name_or_path,
         num_classes=head_config["num_classes"],
         hidden_layer=args.hidden_layer,
+        head_type=head_type,
         head_output_activation=args.head_output_activation,
         head_output_scale=args.head_output_scale,
         head_crf_blank_score=float(args.koi_blank_score),
         head_crf_n_base=n_base,
         head_crf_expand_blanks=True,
+        pre_ctc_module=args.pre_ctc_module,
+        pre_ctc_transformer_nhead=args.pre_ctc_transformer_nhead,
+        pre_ctc_transformer_ffn_dim=args.pre_ctc_transformer_ffn_dim,
+        pre_ctc_transformer_dropout=args.pre_ctc_transformer_dropout,
+        pre_ctc_transformer_activation=args.pre_ctc_transformer_activation,
     ).to(device)
     model.load_state_dict(sd, strict=False)
     model.eval()
@@ -227,16 +245,23 @@ def main():
                     logits_btc = model(input_ids, attention_mask=attention_mask)  # [B,T,C]
 
                 logits_tbc = logits_btc.transpose(0, 1)
-                pred_ids = koi_beam_search_decode(
-                    logits_tbc,
-                    beam_width=args.beam_width,
-                    beam_cut=args.koi_beam_cut,
-                    scale=args.koi_scale,
-                    offset=args.koi_offset,
-                    blank_score=args.koi_blank_score,
-                    reverse=args.koi_reverse,
-                    input_lengths=input_lengths,
-                )
+                if head_type == "ctc":
+                    pred_ids = ctc_greedy_decode(
+                        logits_tbc,
+                        blank_idx=0,
+                        input_lengths=input_lengths,
+                    )
+                else:
+                    pred_ids = koi_beam_search_decode(
+                        logits_tbc,
+                        beam_width=args.beam_width,
+                        beam_cut=args.koi_beam_cut,
+                        scale=args.koi_scale,
+                        offset=args.koi_offset,
+                        blank_score=args.koi_blank_score,
+                        reverse=args.koi_reverse,
+                        input_lengths=input_lengths,
+                    )
                 for ids in pred_ids:
                     seq = "".join(ID2BASE.get(i, "N") for i in ids)
                     qstring = _constant_qstring(len(seq), args.beam_q)

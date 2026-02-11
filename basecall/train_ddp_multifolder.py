@@ -37,6 +37,7 @@ from .utils import seed_everything, BLANK_IDX, ID2BASE, resolve_input_lengths
 from .model import BasecallModel
 from .metrics import (
     koi_beam_search_decode,
+    ctc_greedy_decode,
     batch_bonito_accuracy,
     plot_curves,
     save_metrics_csv,
@@ -258,6 +259,7 @@ def train_one_epoch(
     log_interval: int,
     use_wandb: bool,
     ctc_crf_blank_score: float,
+    head_type: str,
 ):
     model.train()
     total_loss, n_batches = 0.0, 0
@@ -286,13 +288,25 @@ def train_one_epoch(
         # logits_btc = model(input_ids)              # [B,T,C]
         logits_tbc = logits_btc.transpose(0, 1)    # [T,B,C]
 
-        loss = ctc_crf_loss(
-            logits_tbc,
-            target_labels,
-            input_lengths,
-            target_lengths,
-            blank_idx=BLANK_IDX,
-        )
+        if head_type == "ctc":
+            log_probs = torch.nn.functional.log_softmax(logits_tbc, dim=-1)
+            loss = torch.nn.functional.ctc_loss(
+                log_probs,
+                target_labels,
+                input_lengths,
+                target_lengths,
+                blank=BLANK_IDX,
+                reduction="mean",
+                zero_infinity=True,
+            )
+        else:
+            loss = ctc_crf_loss(
+                logits_tbc,
+                target_labels,
+                input_lengths,
+                target_lengths,
+                blank_idx=BLANK_IDX,
+            )
         if torch.isfinite(loss):
             loss.backward()
             optimizer.step()
@@ -324,6 +338,7 @@ def eval_one_epoch(
     ctc_crf_blank_score: float,
     acc_balanced: bool,
     acc_min_coverage: float,
+    head_type: str,
 ) -> Tuple[float, float, float, float, float, float]:
     model.eval()
     total_loss, n_batches = 0.0, 0
@@ -354,21 +369,40 @@ def eval_one_epoch(
         # logits_btc = model(input_ids)              # [B,T,C]
         logits_tbc = logits_btc.transpose(0, 1)    # [T,B,C]
 
-        loss = ctc_crf_loss(
-            logits_tbc,
-            target_labels,
-            input_lengths,
-            target_lengths,
-            blank_idx=BLANK_IDX,
-        )
+        if head_type == "ctc":
+            log_probs = torch.nn.functional.log_softmax(logits_tbc, dim=-1)
+            loss = torch.nn.functional.ctc_loss(
+                log_probs,
+                target_labels,
+                input_lengths,
+                target_lengths,
+                blank=BLANK_IDX,
+                reduction="mean",
+                zero_infinity=True,
+            )
+        else:
+            loss = ctc_crf_loss(
+                logits_tbc,
+                target_labels,
+                input_lengths,
+                target_lengths,
+                blank_idx=BLANK_IDX,
+            )
         
         total_loss += float(loss.item())
         n_batches += 1
-        pred_seqs = koi_beam_search_decode(
-            logits_tbc,
-            blank_score=float(ctc_crf_blank_score),
-            input_lengths=input_lengths,
-        )
+        if head_type == "ctc":
+            pred_seqs = ctc_greedy_decode(
+                logits_tbc,
+                blank_idx=BLANK_IDX,
+                input_lengths=input_lengths,
+            )
+        else:
+            pred_seqs = koi_beam_search_decode(
+                logits_tbc,
+                blank_score=float(ctc_crf_blank_score),
+                input_lengths=input_lengths,
+            )
         acc = batch_bonito_accuracy(
             pred_seqs,
             batch["target_seqs"],
@@ -378,20 +412,26 @@ def eval_one_epoch(
         total_acc += float(acc)
         n_acc += 1
         input_len_list = input_lengths.detach().cpu().tolist()
-        crf_decoded = []
+        aux_decoded = []
         for idx, (r_ids, input_len) in enumerate(zip(batch["target_seqs"], input_len_list)):
             step_len = int(input_len)
             if step_len <= 0:
                 blank_ratios.append(1.0)
                 nonzero_lengths.append(0.0)
-                ref_len = max(len(r_ids), 1)
                 total_cov += 0.0
                 n_cov += 1
-                crf_decoded.append([])
+                aux_decoded.append([])
                 continue
-            decoded_ids = ctc_crf_decode(logits_tbc[:step_len, idx : idx + 1, :], blank_idx=BLANK_IDX)[0]
+            if head_type == "ctc":
+                decoded_ids = ctc_greedy_decode(
+                    logits_tbc[:step_len, idx : idx + 1, :],
+                    blank_idx=BLANK_IDX,
+                    input_lengths=torch.tensor([step_len], device=logits_tbc.device),
+                )[0]
+            else:
+                decoded_ids = ctc_crf_decode(logits_tbc[:step_len, idx : idx + 1, :], blank_idx=BLANK_IDX)[0]
             decoded_len = min(len(decoded_ids), step_len)
-            crf_decoded.append(decoded_ids[:decoded_len])
+            aux_decoded.append(decoded_ids[:decoded_len])
             blank_ratio = max(1.0 - (decoded_len / max(step_len, 1)), 0.0)
             blank_ratios.append(blank_ratio)
             nonzero_len = float(decoded_len)
@@ -400,7 +440,7 @@ def eval_one_epoch(
             total_cov += nonzero_len / ref_len
             n_cov += 1
         crf_acc = batch_bonito_accuracy(
-            crf_decoded,
+            aux_decoded,
             batch["target_seqs"],
             balanced=acc_balanced,
             min_coverage=acc_min_coverage,
@@ -561,10 +601,22 @@ def parse_args():
     p.add_argument("--unfreeze_layer_end", type=int, default=None,
                    help="Unfreeze backbone layers in [start, end). Optional finer control.")
 
+    p.add_argument("--head_type", choices=["ctc", "ctc_crf"], default="ctc_crf",
+                   help="Prediction head type.")
     p.add_argument("--head_output_activation", choices=["tanh", "relu"], default=None,
                    help="Optional activation applied to head output logits.")
     p.add_argument("--head_output_scale", type=float, default=None,
                    help="Optional scalar applied to head output logits (after activation).")
+    p.add_argument("--pre_ctc_module", choices=["none", "bilstm", "transformer"], default="none",
+                   help="Optional module before CTC-CRF head.")
+    p.add_argument("--pre_ctc_transformer_nhead", type=int, default=8,
+                   help="Transformer pre-CTC attention heads.")
+    p.add_argument("--pre_ctc_transformer_ffn_dim", type=int, default=None,
+                   help="Transformer pre-CTC FFN hidden dim (default 4*d_model).")
+    p.add_argument("--pre_ctc_transformer_dropout", type=float, default=0.1,
+                   help="Transformer pre-CTC dropout.")
+    p.add_argument("--pre_ctc_transformer_activation", choices=["relu", "gelu"], default="gelu",
+                   help="Transformer pre-CTC activation.")
 
     p.add_argument("--acc_balanced", action="store_true",
                    help="Use Bonito balanced accuracy: (match - ins) / (match + mismatch + del).")
@@ -612,8 +664,12 @@ def main():
     n_base = len(ID2BASE) - 1
     if n_base <= 0:
         raise ValueError("CTC-CRF alphabet must include at least one non-blank base.")
-    # CTC-CRF head emits full (blank+base) scores; blank score is overwritten during forward.
-    num_classes = (n_base ** args.ctc_crf_state_len) * (n_base + 1)
+    # Head classes depend on selected head type.
+    if args.head_type == "ctc":
+        num_classes = len(ID2BASE)
+    else:
+        # CTC-CRF head emits full (blank+base) scores; blank score is overwritten during forward.
+        num_classes = (n_base ** args.ctc_crf_state_len) * (n_base + 1)
 
     base_model = BasecallModel(
         model_path=args.model_name_or_path,
@@ -624,11 +680,17 @@ def main():
         unfreeze_last_n_layers=args.unfreeze_last_n_layers,
         unfreeze_layer_start=args.unfreeze_layer_start,
         unfreeze_layer_end=args.unfreeze_layer_end,
+        head_type=args.head_type,
         head_output_activation=args.head_output_activation,
         head_output_scale=args.head_output_scale,
         head_crf_blank_score=float(args.ctc_crf_blank_score),
         head_crf_n_base=n_base,
         head_crf_state_len=int(args.ctc_crf_state_len),
+        pre_ctc_module=args.pre_ctc_module,
+        pre_ctc_transformer_nhead=args.pre_ctc_transformer_nhead,
+        pre_ctc_transformer_ffn_dim=args.pre_ctc_transformer_ffn_dim,
+        pre_ctc_transformer_dropout=args.pre_ctc_transformer_dropout,
+        pre_ctc_transformer_activation=args.pre_ctc_transformer_activation,
     ).to(device)
 
     model = base_model
@@ -815,6 +877,7 @@ def main():
             args.log_interval,
             use_wandb,
             args.ctc_crf_blank_score,
+            args.head_type,
         )
         train_losses.append(tr_loss)
 
@@ -834,6 +897,7 @@ def main():
                 args.ctc_crf_blank_score,
                 args.acc_balanced,
                 args.acc_min_coverage,
+                args.head_type,
             )
             val_losses.append(val_loss)
             val_accs.append(val_acc)
@@ -899,6 +963,7 @@ def main():
             args.ctc_crf_blank_score,
             args.acc_balanced,
             args.acc_min_coverage,
+            args.head_type,
         )
         if is_main_process(rank):
             logger.info(
@@ -943,11 +1008,18 @@ def main():
                 attention_mask=attention_mask,
                 input_lengths=batch.get("input_lengths"),
             )
-            pred_seqs = koi_beam_search_decode(
-                logits_tbc,
-                blank_score=float(args.ctc_crf_blank_score),
-                input_lengths=input_lengths,
-            )
+            if args.head_type == "ctc":
+                pred_seqs = ctc_greedy_decode(
+                    logits_tbc,
+                    blank_idx=BLANK_IDX,
+                    input_lengths=input_lengths,
+                )
+            else:
+                pred_seqs = koi_beam_search_decode(
+                    logits_tbc,
+                    blank_score=float(args.ctc_crf_blank_score),
+                    input_lengths=input_lengths,
+                )
             ref_seqs = batch["target_seqs"]
             fig = plot_alignment_heatmap(pred_seqs, ref_seqs, max_reads=32, max_len=80)
             wandb.log({"final/base_alignment": wandb.Image(fig)})

@@ -66,6 +66,98 @@ class LinearCRFEncoder(nn.Module):
         return scores
 
 
+class LinearCTCEncoder(nn.Module):
+    def __init__(
+        self,
+        insize: int,
+        num_classes: int,
+        bias: bool = True,
+        scale: float | None = None,
+        activation: str | None = None,
+    ) -> None:
+        super().__init__()
+        self.scale = scale
+        self.linear = nn.Linear(insize, int(num_classes), bias=bias)
+        if activation is None:
+            self.activation = None
+        elif activation == "tanh":
+            self.activation = torch.tanh
+        elif activation == "relu":
+            self.activation = torch.relu
+        elif activation == "gelu":
+            self.activation = torch.nn.functional.gelu
+        else:
+            raise ValueError(f"Unknown activation: {activation}")
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        scores = self.linear(x)
+        if self.activation is not None:
+            scores = self.activation(scores)
+        if self.scale is not None:
+            scores = scores * self.scale
+        return scores
+
+
+class IdentityPreHead(nn.Module):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x
+
+
+class BiLSTMPreHead(nn.Module):
+    def __init__(self, input_size: int, hidden_size: int = 128) -> None:
+        super().__init__()
+        self.hidden_size = int(hidden_size)
+        self.bilstm = nn.LSTM(
+            input_size=input_size,
+            hidden_size=self.hidden_size,
+            num_layers=1,
+            batch_first=True,
+            bidirectional=True,
+        )
+
+    @property
+    def output_size(self) -> int:
+        return self.hidden_size * 2
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        y, _ = self.bilstm(x)
+        return y
+
+
+class TransformerPreHead(nn.Module):
+    def __init__(
+        self,
+        d_model: int,
+        nhead: int = 8,
+        dim_feedforward: int | None = None,
+        dropout: float = 0.1,
+        activation: str = "gelu",
+    ) -> None:
+        super().__init__()
+        if d_model % nhead != 0:
+            raise ValueError(f"d_model={d_model} must be divisible by nhead={nhead}.")
+        ff_dim = int(dim_feedforward) if dim_feedforward is not None else d_model * 4
+        self.layer = nn.TransformerEncoderLayer(
+            d_model=d_model,
+            nhead=nhead,
+            dim_feedforward=ff_dim,
+            dropout=dropout,
+            activation=activation,
+            batch_first=True,
+            norm_first=True,
+        )
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        attention_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        key_padding_mask = None
+        if attention_mask is not None:
+            key_padding_mask = attention_mask == 0
+        return self.layer(x, src_key_padding_mask=key_padding_mask)
+
+
 class BasecallModel(nn.Module):
     """
     input_ids: [B, T]
@@ -87,6 +179,12 @@ class BasecallModel(nn.Module):
         head_crf_n_base: int | None = None,
         head_crf_state_len: int | None = None,
         head_crf_expand_blanks: bool = True,
+        head_type: str = "ctc_crf",
+        pre_ctc_module: str = "none",
+        pre_ctc_transformer_nhead: int = 8,
+        pre_ctc_transformer_ffn_dim: int | None = None,
+        pre_ctc_transformer_dropout: float = 0.1,
+        pre_ctc_transformer_activation: str = "gelu",
     ):
         super().__init__()
         self.hidden_layer = hidden_layer
@@ -149,28 +247,65 @@ class BasecallModel(nn.Module):
         if hidden_size is None:
             raise ValueError("Cannot infer hidden_size from backbone config.")
 
-        if num_classes is None:
-            num_classes = NUM_CLASSES
+        self.pre_ctc_module_name = str(pre_ctc_module).lower()
+        if self.pre_ctc_module_name == "none":
+            self.pre_ctc_module = IdentityPreHead()
+            head_input_size = hidden_size
+        elif self.pre_ctc_module_name == "bilstm":
+            self.pre_ctc_module = BiLSTMPreHead(input_size=hidden_size, hidden_size=128)
+            head_input_size = self.pre_ctc_module.output_size
+            if head_input_size != 256:
+                raise ValueError(f"BiLSTM pre-CTC output must be 256, got {head_input_size}.")
+        elif self.pre_ctc_module_name == "transformer":
+            self.pre_ctc_module = TransformerPreHead(
+                d_model=hidden_size,
+                nhead=int(pre_ctc_transformer_nhead),
+                dim_feedforward=pre_ctc_transformer_ffn_dim,
+                dropout=float(pre_ctc_transformer_dropout),
+                activation=str(pre_ctc_transformer_activation),
+            )
+            head_input_size = hidden_size
+        else:
+            raise ValueError("pre_ctc_module must be one of: none, bilstm, transformer.")
 
-        n_base = head_crf_n_base if head_crf_n_base is not None else (len(ID2BASE) - 1)
-        if head_crf_state_len is None:
-            if n_base <= 1:
-                raise ValueError("Cannot infer head_crf_state_len with n_base <= 1.")
-            base = num_classes / (n_base + 1)
-            state_len = math.log(base, n_base) - 1
-            if not math.isclose(state_len, round(state_len)):
-                raise ValueError("Unable to infer head_crf_state_len from num_classes and n_base.")
-            head_crf_state_len = int(round(state_len))
-        self.base_head = LinearCRFEncoder(
-            insize=hidden_size,
-            n_base=n_base,
-            state_len=head_crf_state_len,
-            bias=True,
-            scale=head_output_scale,
-            activation=head_output_activation,
-            blank_score=head_crf_blank_score,
-            expand_blanks=head_crf_expand_blanks,
-        )
+        self.head_type = str(head_type).lower()
+        if self.head_type not in {"ctc", "ctc_crf"}:
+            raise ValueError("head_type must be one of: ctc, ctc_crf.")
+
+        if num_classes is None:
+            if self.head_type == "ctc":
+                num_classes = NUM_CLASSES
+            else:
+                raise ValueError("num_classes must be set when head_type=ctc_crf.")
+
+        if self.head_type == "ctc":
+            self.base_head = LinearCTCEncoder(
+                insize=head_input_size,
+                num_classes=int(num_classes),
+                bias=True,
+                scale=head_output_scale,
+                activation=head_output_activation,
+            )
+        else:
+            n_base = head_crf_n_base if head_crf_n_base is not None else (len(ID2BASE) - 1)
+            if head_crf_state_len is None:
+                if n_base <= 1:
+                    raise ValueError("Cannot infer head_crf_state_len with n_base <= 1.")
+                base = num_classes / (n_base + 1)
+                state_len = math.log(base, n_base) - 1
+                if not math.isclose(state_len, round(state_len)):
+                    raise ValueError("Unable to infer head_crf_state_len from num_classes and n_base.")
+                head_crf_state_len = int(round(state_len))
+            self.base_head = LinearCRFEncoder(
+                insize=head_input_size,
+                n_base=n_base,
+                state_len=head_crf_state_len,
+                bias=True,
+                scale=head_output_scale,
+                activation=head_output_activation,
+                blank_score=head_crf_blank_score,
+                expand_blanks=head_crf_expand_blanks,
+            )
 
     def _get_transformer_layers(self) -> nn.ModuleList:
         candidates = (
@@ -230,6 +365,11 @@ class BasecallModel(nn.Module):
                 f"hidden_layer={self.hidden_layer} out of range "
                 f"(num hidden states = {len(hidden_states)})"
             )
+
+        if self.pre_ctc_module_name == "transformer":
+            hidden = self.pre_ctc_module(hidden, attention_mask=attention_mask)
+        else:
+            hidden = self.pre_ctc_module(hidden)
 
         logits_btc = self.base_head(hidden)
         return logits_btc

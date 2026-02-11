@@ -37,6 +37,7 @@ def main() -> None:
     head_config = infer_head_config_from_state_dict(sd)
     summary = {
         "num_classes": head_config["num_classes"],
+        "head_type": head_config.get("head_type", "unknown"),
     }
     print(json.dumps(summary, indent=2))
 

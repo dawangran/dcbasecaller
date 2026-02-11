@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+import math
 import random
 from typing import Dict, Any
 
@@ -72,6 +73,23 @@ def infer_head_config_from_state_dict(
         if isinstance(weight, torch.Tensor) and weight.dim() == 2:
             return int(weight.shape[0])
         return int(default_num_classes)
+
+    def _infer_head_type() -> str:
+        if "base_head.n_base" in state_dict or "base_head.state_len" in state_dict:
+            return "ctc_crf"
+        weight = state_dict.get("base_head.linear.weight")
+        if isinstance(weight, torch.Tensor) and weight.dim() == 2:
+            out_dim = int(weight.shape[0])
+            n_base = len(ID2BASE) - 1
+            if n_base > 1:
+                base = out_dim / (n_base + 1)
+                if base > 0:
+                    state_len = math.log(base, n_base) - 1
+                    if state_len >= 0 and math.isclose(state_len, round(state_len)):
+                        return "ctc_crf"
+        return "ctc"
+
     return {
         "num_classes": int(_infer_num_classes()),
+        "head_type": _infer_head_type(),
     }
