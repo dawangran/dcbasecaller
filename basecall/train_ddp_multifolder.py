@@ -27,6 +27,7 @@ from typing import Tuple, Optional, Any, Dict, List
 import numpy as np
 
 import torch
+import torch.nn.functional as F
 from torch.amp import autocast, GradScaler
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -262,6 +263,7 @@ def train_one_epoch(
     use_amp: bool,
     scaler: GradScaler,
     clip_grad_norm: float,
+    head_type: str,
 ):
     model.train()
     total_loss, n_batches = 0.0, 0
@@ -287,13 +289,25 @@ def train_one_epoch(
         with autocast(device.type, enabled=use_amp):
             logits_btc = model(input_ids, attention_mask=attention_mask)
             logits_tbc = logits_btc.transpose(0, 1)    # [T,B,C]
-            loss = ctc_crf_loss(
-                logits_tbc,
-                target_labels,
-                input_lengths,
-                target_lengths,
-                blank_idx=BLANK_IDX,
-            )
+            if head_type == "ctc_crf":
+                loss = ctc_crf_loss(
+                    logits_tbc,
+                    target_labels,
+                    input_lengths,
+                    target_lengths,
+                    blank_idx=BLANK_IDX,
+                )
+            else:
+                log_probs = F.log_softmax(logits_tbc, dim=-1)
+                loss = F.ctc_loss(
+                    log_probs,
+                    target_labels,
+                    input_lengths,
+                    target_lengths,
+                    blank=BLANK_IDX,
+                    reduction="mean",
+                    zero_infinity=True,
+                )
         if torch.isfinite(loss):
             if use_amp:
                 scaler.scale(loss).backward()
@@ -338,6 +352,7 @@ def eval_one_epoch(
     acc_min_coverage: float,
     use_amp: bool,
     decoder_mode: str,
+    head_type: str,
 ) -> Tuple[float, float, float, float, float, float]:
     model.eval()
     total_loss, n_batches = 0.0, 0
@@ -369,13 +384,25 @@ def eval_one_epoch(
         # logits_btc = model(input_ids)              # [B,T,C]
         logits_tbc = logits_btc.transpose(0, 1)    # [T,B,C]
 
-        loss = ctc_crf_loss(
-            logits_tbc,
-            target_labels,
-            input_lengths,
-            target_lengths,
-            blank_idx=BLANK_IDX,
-        )
+        if head_type == "ctc_crf":
+            loss = ctc_crf_loss(
+                logits_tbc,
+                target_labels,
+                input_lengths,
+                target_lengths,
+                blank_idx=BLANK_IDX,
+            )
+        else:
+            log_probs = F.log_softmax(logits_tbc, dim=-1)
+            loss = F.ctc_loss(
+                log_probs,
+                target_labels,
+                input_lengths,
+                target_lengths,
+                blank=BLANK_IDX,
+                reduction="mean",
+                zero_infinity=True,
+            )
         
         total_loss += float(loss.item())
         n_batches += 1
@@ -587,6 +614,8 @@ def parse_args():
                    help="Optional activation applied to head output logits.")
     p.add_argument("--head_output_scale", type=float, default=None,
                    help="Optional scalar applied to head output logits (after activation).")
+    p.add_argument("--head_type", choices=["ctc", "ctc_crf"], default="ctc_crf",
+                   help="Head type: plain CTC linear head or CTC-CRF head.")
     p.add_argument("--pre_head_type", choices=["none", "bilstm", "transformer"], default="none",
                    help="Optional module before CTC-CRF head.")
     p.add_argument("--pre_head_typebilstm", dest="pre_head_type", action="store_const", const="bilstm",
@@ -651,7 +680,10 @@ def main():
     if n_base <= 0:
         raise ValueError("CTC-CRF alphabet must include at least one non-blank base.")
     # CTC-CRF head emits full (blank+base) scores; blank score is overwritten during forward.
-    num_classes = (n_base ** args.ctc_crf_state_len) * (n_base + 1)
+    if args.head_type == "ctc_crf":
+        num_classes = (n_base ** args.ctc_crf_state_len) * (n_base + 1)
+    else:
+        num_classes = len(ID2BASE)
 
     base_model = BasecallModel(
         model_path=args.model_name_or_path,
@@ -666,6 +698,7 @@ def main():
         head_output_scale=args.head_output_scale,
         pre_head_type=args.pre_head_type,
         pre_head_transformer_nhead=args.pre_head_transformer_nhead,
+        head_type=args.head_type,
         head_crf_blank_score=float(args.ctc_crf_blank_score),
         head_crf_n_base=n_base,
         head_crf_state_len=int(args.ctc_crf_state_len),
@@ -842,6 +875,8 @@ def main():
     # if resuming mid-run, you may want to pad arrays; we keep it simple:
     # curves will reflect only epochs run in this session.
     if args.train_decoder == "ctc_crf":
+        if args.head_type != "ctc_crf":
+            raise ValueError("--train_decoder ctc_crf requires --head_type ctc_crf.")
         use_amp = False
         if args.amp and is_main_process(rank):
             logger.info("[AMP] Disabled for ctc_crf decoder (requires fp32).")
@@ -870,6 +905,7 @@ def main():
             use_amp,
             scaler,
             args.clip_grad_norm,
+            args.head_type,
         )
         train_losses.append(tr_loss)
 
@@ -892,6 +928,7 @@ def main():
                 args.acc_min_coverage,
                 use_amp,
                 args.train_decoder,
+                args.head_type,
             )
             val_losses.append(val_loss)
             val_accs.append(val_acc)
@@ -966,6 +1003,7 @@ def main():
             args.acc_min_coverage,
             use_amp,
             args.train_decoder,
+            args.head_type,
         )
         if is_main_process(rank):
             if args.train_decoder == "ctc_crf":

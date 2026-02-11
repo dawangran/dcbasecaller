@@ -64,14 +64,27 @@ def infer_head_config_from_state_dict(
     if default_num_classes is None:
         default_num_classes = len(ID2BASE)
 
+    def _infer_head_type() -> str:
+        if isinstance(state_dict.get("base_head.linear.weight"), torch.Tensor):
+            return "ctc_crf"
+        if isinstance(state_dict.get("base_head.proj.weight"), torch.Tensor):
+            return "ctc"
+        return "ctc"
+
     def _infer_num_classes() -> int:
-        weight = state_dict.get("base_head.proj.weight")
+        head_type = _infer_head_type()
+        if head_type == "ctc":
+            weight = state_dict.get("base_head.proj.weight")
+            if isinstance(weight, torch.Tensor) and weight.dim() == 2:
+                return int(weight.shape[0])
+        weight = state_dict.get("base_head.linear.weight")
         if isinstance(weight, torch.Tensor) and weight.dim() == 2:
             return int(weight.shape[0])
-        weight = state_dict.get("base_head.linear.weight")
+        weight = state_dict.get("base_head.proj.weight")
         if isinstance(weight, torch.Tensor) and weight.dim() == 2:
             return int(weight.shape[0])
         return int(default_num_classes)
     return {
+        "head_type": _infer_head_type(),
         "num_classes": int(_infer_num_classes()),
     }

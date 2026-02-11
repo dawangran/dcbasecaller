@@ -142,6 +142,7 @@ basecall-train \
 **Head options**
 - `--head_output_activation`: optional activation for head logits (e.g. `tanh` for Bonito-style scaling).
 - `--head_output_scale`: optional scalar multiplier for head logits (applied after activation).
+- `--head_type`: select output head (`ctc` or `ctc_crf`).
 - `--pre_head_type`: optional adapter before CRF head (`none`, `bilstm`, `transformer`).
 - `--pre_head_transformer_nhead`: attention heads when `--pre_head_type transformer`.
 
@@ -210,6 +211,7 @@ basecall-eval \
 - `--beam_width`: beam width for ont-koi `beam_search`.
 - `--koi_beam_cut`, `--koi_scale`, `--koi_offset`, `--koi_blank_score`, `--koi_reverse`: parameters for the Koi `beam_search` decoder.
 - `--decoder`: choose `koi` or `ctc_crf` for prediction/metrics.
+- `--head_type`: optional override for checkpoint head type (`ctc` or `ctc_crf`, default auto-infer).
 - `--acc_balanced`: use Bonito balanced accuracy in metrics.
 - `--acc_min_coverage`: minimum reference coverage required to count a read for accuracy.
 - `--batch_size`, `--num_workers`: eval dataloader controls.
@@ -249,6 +251,7 @@ basecall-infer \
 - `--koi_blank_score`: blank score used by the decoder (default: 2.0).
 - `--koi_reverse`: reverse output sequence (useful for reverse-complemented models).
 - `--decoder`: choose `koi` or `ctc_crf` for prediction; CTC-CRF forces fp32 decoding.
+- `--head_type`: optional override for checkpoint head type (`ctc` or `ctc_crf`, default auto-infer).
 
 ### Notes for Bonito-style CTC-CRF training/inference
 

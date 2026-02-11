@@ -66,6 +66,39 @@ class LinearCRFEncoder(nn.Module):
         return scores
 
 
+
+
+class LinearCTCEncoder(nn.Module):
+    def __init__(
+        self,
+        insize: int,
+        num_classes: int,
+        bias: bool = True,
+        scale: float | None = None,
+        activation: str | None = None,
+    ) -> None:
+        super().__init__()
+        self.scale = scale
+        self.proj = nn.Linear(insize, num_classes, bias=bias)
+        if activation is None:
+            self.activation = None
+        elif activation == "tanh":
+            self.activation = torch.tanh
+        elif activation == "relu":
+            self.activation = torch.relu
+        elif activation == "gelu":
+            self.activation = torch.nn.functional.gelu
+        else:
+            raise ValueError(f"Unknown activation: {activation}")
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        logits = self.proj(x)
+        if self.activation is not None:
+            logits = self.activation(logits)
+        if self.scale is not None:
+            logits = logits * self.scale
+        return logits
+
 class IdentityPreHead(nn.Module):
     def __init__(self, model_dim: int) -> None:
         super().__init__()
@@ -134,6 +167,7 @@ class BasecallModel(nn.Module):
         head_crf_expand_blanks: bool = True,
         pre_head_type: str = "none",
         pre_head_transformer_nhead: int = 8,
+        head_type: str = "ctc_crf",
     ):
         super().__init__()
         self.hidden_layer = hidden_layer
@@ -199,30 +233,43 @@ class BasecallModel(nn.Module):
         if num_classes is None:
             num_classes = NUM_CLASSES
 
-        n_base = head_crf_n_base if head_crf_n_base is not None else (len(ID2BASE) - 1)
-        if head_crf_state_len is None:
-            if n_base <= 1:
-                raise ValueError("Cannot infer head_crf_state_len with n_base <= 1.")
-            base = num_classes / (n_base + 1)
-            state_len = math.log(base, n_base) - 1
-            if not math.isclose(state_len, round(state_len)):
-                raise ValueError("Unable to infer head_crf_state_len from num_classes and n_base.")
-            head_crf_state_len = int(round(state_len))
+        self.head_type = head_type
         self.pre_head = self._build_pre_head(
             pre_head_type=pre_head_type,
             hidden_size=hidden_size,
             transformer_nhead=pre_head_transformer_nhead,
         )
-        self.base_head = LinearCRFEncoder(
-            insize=self.pre_head.output_dim,
-            n_base=n_base,
-            state_len=head_crf_state_len,
-            bias=True,
-            scale=head_output_scale,
-            activation=head_output_activation,
-            blank_score=head_crf_blank_score,
-            expand_blanks=head_crf_expand_blanks,
-        )
+
+        if self.head_type == "ctc_crf":
+            n_base = head_crf_n_base if head_crf_n_base is not None else (len(ID2BASE) - 1)
+            if head_crf_state_len is None:
+                if n_base <= 1:
+                    raise ValueError("Cannot infer head_crf_state_len with n_base <= 1.")
+                base = num_classes / (n_base + 1)
+                state_len = math.log(base, n_base) - 1
+                if not math.isclose(state_len, round(state_len)):
+                    raise ValueError("Unable to infer head_crf_state_len from num_classes and n_base.")
+                head_crf_state_len = int(round(state_len))
+            self.base_head = LinearCRFEncoder(
+                insize=self.pre_head.output_dim,
+                n_base=n_base,
+                state_len=head_crf_state_len,
+                bias=True,
+                scale=head_output_scale,
+                activation=head_output_activation,
+                blank_score=head_crf_blank_score,
+                expand_blanks=head_crf_expand_blanks,
+            )
+        elif self.head_type == "ctc":
+            self.base_head = LinearCTCEncoder(
+                insize=self.pre_head.output_dim,
+                num_classes=num_classes,
+                bias=True,
+                scale=head_output_scale,
+                activation=head_output_activation,
+            )
+        else:
+            raise ValueError(f"Unsupported head_type: {self.head_type}")
 
     @staticmethod
     def _build_pre_head(

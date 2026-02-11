@@ -194,6 +194,8 @@ def main():
                     help="Reverse sequence output for Koi beam_search decoding.")
     ap.add_argument("--decoder", choices=["koi", "ctc_crf"], default="koi",
                     help="Decoder to use: koi beam search or CTC-CRF Viterbi.")
+    ap.add_argument("--head_type", choices=["ctc", "ctc_crf"], default=None,
+                    help="Override head type (default: infer from checkpoint).")
     ap.add_argument("--ctc_crf_state_len", type=int, default=None,
                     help="Override CTC-CRF state_len (default: infer from head or CTC_CRF_STATE_LEN env).")
     ap.add_argument("--beam_q", type=int, default=20)
@@ -228,10 +230,13 @@ def main():
     else:
         sd = state
     head_config = infer_head_config_from_state_dict(sd)
+    head_type = args.head_type or head_config.get("head_type", "ctc")
     # load model
     n_base = len(ID2BASE) - 1
     state_len = args.ctc_crf_state_len
     if args.decoder == "ctc_crf":
+        if head_type != "ctc_crf":
+            raise ValueError("--decoder ctc_crf requires checkpoint/model head_type=ctc_crf.")
         if state_len is None:
             env_state_len = os.environ.get("CTC_CRF_STATE_LEN")
             if env_state_len is not None:
@@ -247,6 +252,7 @@ def main():
         head_output_scale=args.head_output_scale,
         pre_head_type=args.pre_head_type,
         pre_head_transformer_nhead=args.pre_head_transformer_nhead,
+        head_type=head_type,
         head_crf_blank_score=float(args.koi_blank_score),
         head_crf_n_base=n_base,
         head_crf_state_len=state_len,
