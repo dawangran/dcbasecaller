@@ -83,9 +83,11 @@ basecall-train \
 `--quick` expands to:
 - `--freeze_backbone`
 - `--ctc_crf_state_len 5`
-- `--ctc_crf_blank_score 2`
+- `--ctc_crf_blank_score 0`
 - `--head_output_scale 5`
 - `--head_output_activation tanh`
+- `--head_type ctc_crf`
+- `--pre_ctc_module none`
 
 
 ### Use explicit train/val/test folders (skip auto split, jsonl.gz)
@@ -144,6 +146,7 @@ basecall-train \
 - `--head_output_scale`: optional scalar multiplier for head logits (applied after activation).
 - `--head_type`: select output head (`ctc` or `ctc_crf`).
 - `--pre_head_type`: optional adapter before CRF head (`none`, `bilstm`, `transformer`).
+- `--pre_ctc_module`: alias of `--pre_head_type`.
 - `--pre_head_transformer_nhead`: attention heads when `--pre_head_type transformer`.
 
 

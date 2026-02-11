@@ -573,7 +573,7 @@ def parse_args():
     p.add_argument("--num_epochs", type=int, default=50)
     p.add_argument("--num_workers", type=int, default=4)
     p.add_argument("--quick", action="store_true",
-                   help="Quick mode alias: freeze backbone + ctc_crf_state_len=5 + ctc_crf_blank_score=2 + head_output_scale=5 + head_output_activation=tanh.")
+                   help="Quick mode alias: freeze backbone + ctc_crf_state_len=5 + ctc_crf_blank_score=0 + head_output_scale=5 + head_output_activation=tanh + head_type=ctc_crf + pre_ctc_module=none.")
 
     p.add_argument("--lr", type=float, default=3e-4)
     p.add_argument("--weight_decay", type=float, default=1e-3)
@@ -618,6 +618,8 @@ def parse_args():
                    help="Head type: plain CTC linear head or CTC-CRF head.")
     p.add_argument("--pre_head_type", choices=["none", "bilstm", "transformer"], default="none",
                    help="Optional module before CTC-CRF head.")
+    p.add_argument("--pre_ctc_module", dest="pre_head_type", choices=["none", "bilstm", "transformer"],
+                   help="Alias of --pre_head_type for selecting module before CTC/CTC-CRF head.")
     p.add_argument("--pre_head_typebilstm", dest="pre_head_type", action="store_const", const="bilstm",
                    help=argparse.SUPPRESS)
     p.add_argument("--pre_head_typetransformer", dest="pre_head_type", action="store_const", const="transformer",
@@ -651,10 +653,12 @@ def apply_quick_overrides(args) -> None:
         return
     args.freeze_backbone = True
     args.ctc_crf_state_len = 5
-    args.ctc_crf_blank_score = 2.0
+    args.ctc_crf_blank_score = 0.0
     args.koi_blank_score = 2.0
     args.head_output_scale = 5.0
     args.head_output_activation = "tanh"
+    args.head_type = "ctc_crf"
+    args.pre_head_type = "none"
 
 
 def main():
@@ -671,7 +675,7 @@ def main():
         logger.info(f"[Args] {vars(args)}")
         logger.info(f"[PreHead] type={args.pre_head_type} transformer_nhead={args.pre_head_transformer_nhead}")
         if args.quick:
-            logger.info("[Quick] enabled: freeze_backbone=True, ctc_crf_state_len=5, ctc_crf_blank_score=2, head_output_scale=5, head_output_activation=tanh")
+            logger.info("[Quick] enabled: freeze_backbone=True, ctc_crf_state_len=5, ctc_crf_blank_score=0, head_output_scale=5, head_output_activation=tanh, head_type=ctc_crf, pre_ctc_module=none")
 
     # ---- model (先建模型拿 tokenizer，保持原数据逻辑) ----
     import os as _os
