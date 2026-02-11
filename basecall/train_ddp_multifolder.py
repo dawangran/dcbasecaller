@@ -589,6 +589,10 @@ def parse_args():
                    help="Optional scalar applied to head output logits (after activation).")
     p.add_argument("--pre_head_type", choices=["none", "bilstm", "transformer"], default="none",
                    help="Optional module before CTC-CRF head.")
+    p.add_argument("--pre_head_typebilstm", dest="pre_head_type", action="store_const", const="bilstm",
+                   help=argparse.SUPPRESS)
+    p.add_argument("--pre_head_typetransformer", dest="pre_head_type", action="store_const", const="transformer",
+                   help=argparse.SUPPRESS)
     p.add_argument("--pre_head_transformer_nhead", type=int, default=8,
                    help="Attention heads for --pre_head_type transformer.")
 
@@ -636,6 +640,7 @@ def main():
     if is_main_process(rank):
         logger.info(f"[DDP] world_size={world_size}, rank={rank}, local_rank={local_rank}, device={device}")
         logger.info(f"[Args] {vars(args)}")
+        logger.info(f"[PreHead] type={args.pre_head_type} transformer_nhead={args.pre_head_transformer_nhead}")
         if args.quick:
             logger.info("[Quick] enabled: freeze_backbone=True, ctc_crf_state_len=5, ctc_crf_blank_score=2, head_output_scale=5, head_output_activation=tanh")
 
