@@ -83,7 +83,7 @@ basecall-train \
 `--quick` expands to:
 - `--freeze_backbone`
 - `--ctc_crf_state_len 5`
-- `--ctc_crf_blank_score 2`
+- `--ctc_crf_blank_score 0`
 - `--head_output_scale 5`
 - `--head_output_activation tanh`
 
@@ -140,8 +140,11 @@ basecall-train \
 - `--unfreeze_layer_start`, `--unfreeze_layer_end`: unfreeze layers in range `[start, end)`.
 
 **Head options**
+- `--head_type`: `ctc` or `ctc_crf`.
 - `--head_output_activation`: optional activation for head logits (e.g. `tanh` for Bonito-style scaling).
 - `--head_output_scale`: optional scalar multiplier for head logits (applied after activation).
+- `--pre_ctc_module`: `none`, `bilstm`, or `transformer` (applied before CTC/CTC-CRF head).
+- `--pre_ctc_transformer_nhead`, `--pre_ctc_transformer_ffn_dim`, `--pre_ctc_transformer_dropout`, `--pre_ctc_transformer_activation`: transformer pre-CTC module hyperparameters.
 
 
 **Optimization**
@@ -213,6 +216,9 @@ basecall-eval \
 - `--fastq_out`: optional FASTQ output path for predicted sequences.
 - `--fastq_q`: fixed Phred quality value for FASTQ output (default: 20).
 - `--hidden_layer`: which backbone hidden state to use (default: -1).
+- `--head_type`: `ctc`, `ctc_crf`, or `auto` (infer from checkpoint).
+- `--pre_ctc_module`: `none`, `bilstm`, or `transformer`.
+- `--pre_ctc_transformer_nhead`, `--pre_ctc_transformer_ffn_dim`, `--pre_ctc_transformer_dropout`, `--pre_ctc_transformer_activation`.
 - `--recursive`: scan subfolders for `.jsonl.gz` or tokens/reference `.npy`.
 
 ### Outputs
@@ -259,6 +265,9 @@ basecall-infer \
 - `--overlap`: overlap token count between chunks.
 - `--batch_size`: number of reads per inference batch.
 - `--hidden_layer`: which backbone hidden state to use (default: -1).
+- `--head_type`: `ctc`, `ctc_crf`, or `auto` (infer from checkpoint).
+- `--pre_ctc_module`: `none`, `bilstm`, or `transformer`.
+- `--pre_ctc_transformer_nhead`, `--pre_ctc_transformer_ffn_dim`, `--pre_ctc_transformer_dropout`, `--pre_ctc_transformer_activation`.
 
 **Decoding**
 - `--beam_width`: beam search width.
@@ -273,10 +282,14 @@ basecall-infer \
 
 ## 4.1) Loss and accuracy definitions
 
-- **Training loss** uses Bonito-style CTC-CRF negative log-likelihood (`ctc_crf_loss`) on packed targets with per-read `input_lengths` (derived from `attention_mask`).
-- **Validation/Test accuracy (`acc`)** is Bonito-style alignment accuracy from `koi_beam_search_decode` + parasail alignment (`batch_bonito_accuracy`, unit: %).
+- **Training loss** depends on `--head_type`:
+  - `ctc`: `torch.nn.functional.ctc_loss`
+  - `ctc_crf`: Bonito-style `ctc_crf_loss`
+- **Validation/Test accuracy (`acc`)** uses Bonito alignment accuracy (`batch_bonito_accuracy`, unit: %), with decode path depending on `--head_type`:
+  - `ctc`: greedy CTC decode (`ctc_greedy_decode`)
+  - `ctc_crf`: Koi beam-search decode (`koi_beam_search_decode`)
 - **Balanced accuracy** (`--acc_balanced`) uses `(match - ins) / (match + mismatch + del)`; default uses `match / (match + ins + mismatch + del)`.
-- **CRF decode accuracy (`crf_acc`)** is reported from Viterbi decoding (`ctc_crf.decode`) and uses the same Bonito accuracy function.
+- **Aux decode accuracy (`crf_acc` field name in logs)** uses the same Bonito accuracy function and follows the active head decode path.
 
 ## 5) Notes
 
@@ -291,7 +304,7 @@ basecall-infer \
 basecall-inspect --ckpt ckpt_best.pt
 ```
 
-This prints inferred head settings and suggested `basecall-eval`/`basecall-infer` flags.
+This prints inferred head settings (including `head_type`) and suggested `basecall-eval`/`basecall-infer` flags.
 
 ## 6) Minimal runnable demo
 
