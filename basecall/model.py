@@ -66,6 +66,51 @@ class LinearCRFEncoder(nn.Module):
         return scores
 
 
+class IdentityPreHead(nn.Module):
+    def __init__(self, model_dim: int) -> None:
+        super().__init__()
+        self.output_dim = model_dim
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x
+
+
+class BiLSTMPreHead(nn.Module):
+    def __init__(self, input_dim: int, hidden_dim: int = 128) -> None:
+        super().__init__()
+        self.lstm = nn.LSTM(
+            input_size=input_dim,
+            hidden_size=hidden_dim,
+            num_layers=1,
+            batch_first=True,
+            bidirectional=True,
+        )
+        self.output_dim = hidden_dim * 2
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        out, _ = self.lstm(x)
+        return out
+
+
+class TransformerPreHead(nn.Module):
+    def __init__(self, model_dim: int, nhead: int = 8, dim_feedforward: int | None = None) -> None:
+        super().__init__()
+        ff = dim_feedforward if dim_feedforward is not None else model_dim * 4
+        self.layer = nn.TransformerEncoderLayer(
+            d_model=model_dim,
+            nhead=nhead,
+            dim_feedforward=ff,
+            dropout=0.1,
+            batch_first=True,
+            activation="gelu",
+        )
+        self.encoder = nn.TransformerEncoder(self.layer, num_layers=1)
+        self.output_dim = model_dim
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.encoder(x)
+
+
 class BasecallModel(nn.Module):
     """
     input_ids: [B, T]
@@ -87,6 +132,8 @@ class BasecallModel(nn.Module):
         head_crf_n_base: int | None = None,
         head_crf_state_len: int | None = None,
         head_crf_expand_blanks: bool = True,
+        pre_head_type: str = "none",
+        pre_head_transformer_nhead: int = 8,
     ):
         super().__init__()
         self.hidden_layer = hidden_layer
@@ -161,8 +208,13 @@ class BasecallModel(nn.Module):
             if not math.isclose(state_len, round(state_len)):
                 raise ValueError("Unable to infer head_crf_state_len from num_classes and n_base.")
             head_crf_state_len = int(round(state_len))
+        self.pre_head = self._build_pre_head(
+            pre_head_type=pre_head_type,
+            hidden_size=hidden_size,
+            transformer_nhead=pre_head_transformer_nhead,
+        )
         self.base_head = LinearCRFEncoder(
-            insize=hidden_size,
+            insize=self.pre_head.output_dim,
             n_base=n_base,
             state_len=head_crf_state_len,
             bias=True,
@@ -171,6 +223,24 @@ class BasecallModel(nn.Module):
             blank_score=head_crf_blank_score,
             expand_blanks=head_crf_expand_blanks,
         )
+
+    @staticmethod
+    def _build_pre_head(
+        pre_head_type: str,
+        hidden_size: int,
+        transformer_nhead: int,
+    ) -> nn.Module:
+        if pre_head_type == "none":
+            return IdentityPreHead(hidden_size)
+        if pre_head_type == "bilstm":
+            return BiLSTMPreHead(input_dim=hidden_size, hidden_dim=128)
+        if pre_head_type == "transformer":
+            if hidden_size % transformer_nhead != 0:
+                raise ValueError(
+                    f"hidden_size={hidden_size} must be divisible by transformer nhead={transformer_nhead}."
+                )
+            return TransformerPreHead(model_dim=hidden_size, nhead=transformer_nhead)
+        raise ValueError(f"Unsupported pre_head_type: {pre_head_type}")
 
     def _get_transformer_layers(self) -> nn.ModuleList:
         candidates = (
@@ -231,5 +301,6 @@ class BasecallModel(nn.Module):
                 f"(num hidden states = {len(hidden_states)})"
             )
 
+        hidden = self.pre_head(hidden)
         logits_btc = self.base_head(hidden)
         return logits_btc

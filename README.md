@@ -142,6 +142,8 @@ basecall-train \
 **Head options**
 - `--head_output_activation`: optional activation for head logits (e.g. `tanh` for Bonito-style scaling).
 - `--head_output_scale`: optional scalar multiplier for head logits (applied after activation).
+- `--pre_head_type`: optional adapter before CRF head (`none`, `bilstm`, `transformer`).
+- `--pre_head_transformer_nhead`: attention heads when `--pre_head_type transformer`.
 
 
 **Optimization**
@@ -217,6 +219,7 @@ basecall-eval \
 - `--fastq_out`: optional FASTQ output path for predicted sequences.
 - `--fastq_q`: fixed Phred quality value for FASTQ output (default: 20).
 - `--hidden_layer`: which backbone hidden state to use (default: -1).
+- `--pre_head_type`, `--pre_head_transformer_nhead`: optional pre-head module settings (must match training).
 - `--recursive`: scan subfolders for `.jsonl.gz` or tokens/reference `.npy`.
 
 ### Outputs
@@ -264,6 +267,7 @@ basecall-infer \
 - `--overlap`: overlap token count between chunks.
 - `--batch_size`: number of reads per inference batch.
 - `--hidden_layer`: which backbone hidden state to use (default: -1).
+- `--pre_head_type`, `--pre_head_transformer_nhead`: optional pre-head module settings (must match training).
 
 **Decoding**
 - `--beam_width`: beam search width.

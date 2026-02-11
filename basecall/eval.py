@@ -268,6 +268,10 @@ def main() -> None:
                     help="Optional activation applied to head output logits.")
     ap.add_argument("--head_output_scale", type=float, default=None,
                     help="Optional scalar applied to head output logits (after activation).")
+    ap.add_argument("--pre_head_type", choices=["none", "bilstm", "transformer"], default="none",
+                    help="Optional module before CTC-CRF head.")
+    ap.add_argument("--pre_head_transformer_nhead", type=int, default=8,
+                    help="Attention heads for --pre_head_type transformer.")
     ap.add_argument("--acc_balanced", action="store_true",
                     help="Use Bonito balanced accuracy: (match - ins) / (match + mismatch + del).")
     ap.add_argument("--acc_min_coverage", type=float, default=0.0,
@@ -313,6 +317,8 @@ def main() -> None:
         hidden_layer=args.hidden_layer,
         head_output_activation=args.head_output_activation,
         head_output_scale=args.head_output_scale,
+        pre_head_type=args.pre_head_type,
+        pre_head_transformer_nhead=args.pre_head_transformer_nhead,
         head_crf_blank_score=float(args.koi_blank_score),
         head_crf_n_base=n_base,
         head_crf_state_len=state_len,

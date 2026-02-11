@@ -587,6 +587,10 @@ def parse_args():
                    help="Optional activation applied to head output logits.")
     p.add_argument("--head_output_scale", type=float, default=None,
                    help="Optional scalar applied to head output logits (after activation).")
+    p.add_argument("--pre_head_type", choices=["none", "bilstm", "transformer"], default="none",
+                   help="Optional module before CTC-CRF head.")
+    p.add_argument("--pre_head_transformer_nhead", type=int, default=8,
+                   help="Attention heads for --pre_head_type transformer.")
 
     p.add_argument("--acc_balanced", action="store_true",
                    help="Use Bonito balanced accuracy: (match - ins) / (match + mismatch + del).")
@@ -655,6 +659,8 @@ def main():
         unfreeze_layer_end=args.unfreeze_layer_end,
         head_output_activation=args.head_output_activation,
         head_output_scale=args.head_output_scale,
+        pre_head_type=args.pre_head_type,
+        pre_head_transformer_nhead=args.pre_head_transformer_nhead,
         head_crf_blank_score=float(args.ctc_crf_blank_score),
         head_crf_n_base=n_base,
         head_crf_state_len=int(args.ctc_crf_state_len),
