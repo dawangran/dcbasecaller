@@ -241,6 +241,16 @@ def main() -> None:
                     help="Optional activation applied to head output logits.")
     ap.add_argument("--head_output_scale", type=float, default=None,
                     help="Optional scalar applied to head output logits (after activation).")
+    ap.add_argument("--pre_ctc_module", choices=["none", "bilstm", "transformer"], default="none",
+                    help="Optional module before CTC-CRF head.")
+    ap.add_argument("--pre_ctc_transformer_nhead", type=int, default=8,
+                    help="Transformer pre-CTC attention heads.")
+    ap.add_argument("--pre_ctc_transformer_ffn_dim", type=int, default=None,
+                    help="Transformer pre-CTC FFN hidden dim (default 4*d_model).")
+    ap.add_argument("--pre_ctc_transformer_dropout", type=float, default=0.1,
+                    help="Transformer pre-CTC dropout.")
+    ap.add_argument("--pre_ctc_transformer_activation", choices=["relu", "gelu"], default="gelu",
+                    help="Transformer pre-CTC activation.")
     ap.add_argument("--acc_balanced", action="store_true",
                     help="Use Bonito balanced accuracy: (match - ins) / (match + mismatch + del).")
     ap.add_argument("--acc_min_coverage", type=float, default=0.0,
@@ -280,6 +290,11 @@ def main() -> None:
         head_crf_blank_score=float(args.koi_blank_score),
         head_crf_n_base=n_base,
         head_crf_expand_blanks=True,
+        pre_ctc_module=args.pre_ctc_module,
+        pre_ctc_transformer_nhead=args.pre_ctc_transformer_nhead,
+        pre_ctc_transformer_ffn_dim=args.pre_ctc_transformer_ffn_dim,
+        pre_ctc_transformer_dropout=args.pre_ctc_transformer_dropout,
+        pre_ctc_transformer_activation=args.pre_ctc_transformer_activation,
     ).to(device)
     model.load_state_dict(state_dict, strict=False)
     model.eval()
