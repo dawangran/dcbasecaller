@@ -3,7 +3,7 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers import AutoTokenizer, AutoModel
+from transformers import AutoTokenizer, AutoModel, AutoConfig
 
 from .utils import NUM_CLASSES, ID2BASE
 
@@ -180,15 +180,20 @@ class BasecallModel(nn.Module):
             model_path, trust_remote_code=True
         )
 
-        self.backbone = AutoModel.from_pretrained(
-            model_path,
-            trust_remote_code=True,
-        )
         if reset_backbone_weights:
-            if hasattr(self.backbone, "init_weights"):
-                self.backbone.init_weights()
-            else:
-                self.backbone.apply(self._init_backbone_weights)
+            backbone_config = AutoConfig.from_pretrained(
+                model_path,
+                trust_remote_code=True,
+            )
+            self.backbone = AutoModel.from_config(
+                backbone_config,
+                trust_remote_code=True,
+            )
+        else:
+            self.backbone = AutoModel.from_pretrained(
+                model_path,
+                trust_remote_code=True,
+            )
 
         # 省显存：关闭 cache（很多 decoder-only 默认开）
         if hasattr(self.backbone.config, "use_cache"):
