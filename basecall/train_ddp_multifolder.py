@@ -588,6 +588,10 @@ def parse_args():
     p.add_argument("--wandb_project", type=str, default="basecaller")
     p.add_argument("--wandb_entity", type=str, default=None)
     p.add_argument("--wandb_run_name", type=str, default=None)
+    p.add_argument("--wandb_group", type=str, default=None,
+                   help="Optional W&B group name (useful for grouping condition sweeps).")
+    p.add_argument("--wandb_job_type", type=str, default="train",
+                   help="W&B job_type for this run.")
 
     p.add_argument("--find_unused_parameters", action="store_true",
                    help="Enable DDP unused parameter detection (fix reduction error).")
@@ -850,7 +854,14 @@ def main():
         logger.warning("[wandb] wandb not installed; pip install wandb")
 
     if use_wandb:
-        wandb.init(project=args.wandb_project, entity=args.wandb_entity, name=args.wandb_run_name, config=vars(args))
+        wandb.init(
+            project=args.wandb_project,
+            entity=args.wandb_entity,
+            name=args.wandb_run_name,
+            group=args.wandb_group,
+            job_type=args.wandb_job_type,
+            config=vars(args),
+        )
 
     # ---- resume (after model+optim+sched created) ----
     start_epoch = 1

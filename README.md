@@ -168,7 +168,21 @@ basecall-train \
 
 **DDP/Logging**
 - `--use_wandb`, `--wandb_project`, `--wandb_entity`, `--wandb_run_name`.
+- `--wandb_group`: group related runs (e.g. same experiment family with different conditions).
+- `--wandb_job_type`: run type shown in W&B (default `train`).
 - `--find_unused_parameters`: enable DDP unused parameter detection.
+
+Example for grouped condition sweeps:
+
+```bash
+basecall-train \
+  --jsonl_paths /path/to/data \
+  --model_name_or_path <hf-model> \
+  --use_wandb \
+  --wandb_project DNAmodel_basecall \
+  --wandb_group exp_ctc_vs_crf \
+  --wandb_run_name ctc_crf_prehead_none_lr1e3
+```
 
 **Runtime**
 - `--num_workers`, `--seed`, `--log_interval`, `--output_dir`, `--amp`.
