@@ -121,6 +121,29 @@ def _ids_to_bases(ids: List[int], drop_blank: bool = True) -> str:
             bases.append(base)
     return "".join(bases)
 
+
+def _normalize_base_seq(seq: Any) -> str:
+    """Normalize sequence input to a DNA base string for alignment.
+    Accepts str, list/tuple/np.ndarray/torch.Tensor of token ids.
+    """
+    if seq is None:
+        return ""
+    if isinstance(seq, str):
+        return seq
+    if isinstance(seq, torch.Tensor):
+        seq = seq.detach().cpu().tolist()
+    if isinstance(seq, np.ndarray):
+        seq = seq.tolist()
+    if isinstance(seq, (list, tuple)):
+        ids: List[int] = []
+        for x in seq:
+            try:
+                ids.append(int(x))
+            except Exception:
+                continue
+        return _ids_to_bases(ids, drop_blank=True)
+    return str(seq)
+
 def parasail_to_sam(result, seq):
     """
     Extract reference start and sam compatible cigar string.
@@ -158,11 +181,12 @@ def cal_bonito_accuracy(pred_seq, ref_seq, balanced=False, min_coverage=0.0):
     """
     Calculate the accuracy between `ref` and `seq`
     """
-    alignment = parasail.sw_trace_striped_32(pred_seq, ref_seq, 8, 4, parasail.dnafull)
-    counts = defaultdict(int)
-
+    pred_seq = _normalize_base_seq(pred_seq)
+    ref_seq = _normalize_base_seq(ref_seq)
     if len(ref_seq) == 0:
         return 0.0
+    alignment = parasail.sw_trace_striped_32(pred_seq, ref_seq, 8, 4, parasail.dnafull)
+    counts = defaultdict(int)
 
     _, cigar = parasail_to_sam(alignment, pred_seq)
 
@@ -184,6 +208,8 @@ def parasail_error_counts(pred_seq: str, ref_seq: str) -> Dict[str, int]:
     """
     Return cigar-derived counts from parasail alignment using the same rules as cal_bonito_accuracy.
     """
+    pred_seq = _normalize_base_seq(pred_seq)
+    ref_seq = _normalize_base_seq(ref_seq)
     counts = defaultdict(int)
     if len(ref_seq) == 0:
         return {"match": 0, "mismatch": 0, "ins": 0, "del": 0}
@@ -204,6 +230,8 @@ def parasail_match_vector(pred_seq: str, ref_seq: str) -> List[int]:
     Build a reference-coordinate match vector (1=match, 0=mismatch/delete) from parasail CIGAR.
     Insertions and soft clips do not consume reference positions and are ignored.
     """
+    pred_seq = _normalize_base_seq(pred_seq)
+    ref_seq = _normalize_base_seq(ref_seq)
     if len(ref_seq) == 0:
         return []
     alignment = parasail.sw_trace_striped_32(pred_seq, ref_seq, 8, 4, parasail.dnafull)
