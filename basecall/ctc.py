@@ -10,47 +10,10 @@ import torch.nn.functional as F
 from .utils import BASE2ID, ID2BASE
 
 
-def _ctc_labels(blank_idx: int) -> List[str]:
+def _ctc_alphabet() -> str:
     max_id = max(ID2BASE.keys())
-    labels: List[str] = []
-    for i in range(max_id + 1):
-        if i == blank_idx:
-            continue
-        base = ID2BASE.get(i, "")
-        if base:
-            labels.append(base)
-    return labels
+    return "".join(ID2BASE.get(i, "") for i in range(max_id + 1))
 
-
-def _decode_greedy_fallback(
-    logits_tbc: torch.Tensor,
-    input_lengths: Optional[torch.Tensor],
-    blank_idx: int,
-) -> List[List[int]]:
-    if input_lengths is None:
-        lengths = [logits_tbc.shape[0]] * logits_tbc.shape[1]
-    else:
-        lengths = [min(int(x), logits_tbc.shape[0]) for x in input_lengths.cpu().tolist()]
-
-    pred_tbc = torch.argmax(logits_tbc, dim=-1)  # [T, B]
-    decoded: List[List[int]] = []
-    for b, length in enumerate(lengths):
-        if length <= 0:
-            decoded.append([])
-            continue
-        seq = pred_tbc[:length, b].detach().cpu().tolist()
-        out: List[int] = []
-        prev = None
-        for token in seq:
-            token = int(token)
-            if token == blank_idx:
-                prev = token
-                continue
-            if token != prev:
-                out.append(token)
-            prev = token
-        decoded.append(out)
-    return decoded
 
 def ctc_loss(
     logits_tbc: torch.Tensor,
@@ -85,18 +48,35 @@ def ctc_label_smoothing_loss(
     blank_idx: int = 0,
     weights: Optional[torch.Tensor] = None,
 ) -> dict:
+    """
+    Bonito-style CTC + label smoothing loss.
+    """
     log_probs = F.log_softmax(logits_tbc.to(torch.float32), dim=-1)
-    C = log_probs.shape[-1]
+    _, batch_size, num_classes = log_probs.shape
+
     if weights is None:
         weights = torch.cat(
-            [torch.tensor([0.4]), (0.1 / max(C - 1, 1)) * torch.ones(max(C - 1, 1))]
-        )[:C]
-    base_loss = ctc_loss(
-        logits_tbc=logits_tbc,
-        targets=targets,
-        input_lengths=input_lengths,
-        target_lengths=target_lengths,
-        blank_idx=blank_idx,
+            [torch.tensor([0.4]), (0.1 / max(num_classes - 1, 1)) * torch.ones(max(num_classes - 1, 1))]
+        )[:num_classes]
+
+    # Follow Bonito's behavior: CTC input lengths are full T for each sample.
+    full_input_lengths = torch.full(
+        size=(batch_size,),
+        fill_value=log_probs.shape[0],
+        dtype=torch.long,
+        device="cpu",
+    )
+    targets = targets.to(dtype=torch.long)
+    target_lengths = target_lengths.to(dtype=torch.long, device="cpu")
+
+    base_loss = F.ctc_loss(
+        log_probs,
+        targets,
+        full_input_lengths,
+        target_lengths,
+        blank=blank_idx,
+        reduction="mean",
+        zero_infinity=True,
     )
     label_smooth_loss = -((log_probs * weights.to(log_probs.device)).mean())
     return {
@@ -115,36 +95,36 @@ def decode(
     qscores: bool = False,
 ) -> List[List[int]]:
     """
-    Bonito-style CTC Viterbi path collapse (beamsize=1 equivalent):
-    timestep argmax -> collapse repeats -> remove blank.
+    Bonito-style decode via fast_ctc_decode.
+    Returns decoded token ids for each batch item.
     """
-    try:
-        from fast_ctc_decode import beam_search, viterbi_search  # type: ignore
-    except Exception:
-        return _decode_greedy_fallback(logits_tbc, input_lengths, blank_idx)
+    from fast_ctc_decode import beam_search, viterbi_search  # type: ignore
 
     if input_lengths is None:
         lengths = [logits_tbc.shape[0]] * logits_tbc.shape[1]
     else:
         lengths = [min(int(x), logits_tbc.shape[0]) for x in input_lengths.cpu().tolist()]
 
-    labels = _ctc_labels(blank_idx)
-    log_probs = F.log_softmax(logits_tbc.to(torch.float32), dim=-1)
+    alphabet = _ctc_alphabet()
+    posteriors = F.log_softmax(logits_tbc.to(torch.float32), dim=-1).exp()
+
     out_ids: List[List[int]] = []
     for b, length in enumerate(lengths):
         if length <= 0:
             out_ids.append([])
             continue
-        probs = log_probs[:length, b, :].exp().detach().cpu().numpy().astype(np.float32)
+
+        probs = posteriors[:length, b, :].detach().cpu().numpy().astype(np.float32)
         if beamsize == 1 or qscores:
-            try:
-                seq, _path = viterbi_search(probs, labels, qscores)
-            except TypeError:
-                seq, _path = viterbi_search(probs, labels)
+            seq, _path = viterbi_search(probs, alphabet)
         else:
-            try:
-                seq, _path = beam_search(probs, labels, beamsize, threshold)
-            except TypeError:
-                seq, _path = beam_search(probs, labels)
+            seq, _path = beam_search(
+                probs,
+                alphabet,
+                beam_size=beamsize,
+                beam_cut_threshold=threshold,
+            )
+
         out_ids.append([BASE2ID.get(ch, blank_idx) for ch in str(seq)])
+
     return out_ids
