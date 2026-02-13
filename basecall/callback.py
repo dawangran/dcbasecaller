@@ -16,19 +16,11 @@ try:
 except Exception:
     wandb = None
 
+from .metrics import parasail_match_vector
+
 
 def _align_to_match_vector(pred, ref):
-    sm = difflib.SequenceMatcher(a=ref, b=pred)  # align on reference
-    match = []
-    for tag, i1, i2, j1, j2 in sm.get_opcodes():
-        if tag == "equal":
-            match.extend([1] * (i2 - i1))
-        elif tag in ("replace", "delete"):
-            match.extend([0] * (i2 - i1))
-        elif tag == "insert":
-            # insert doesn't consume ref positions; ignore for ref-coordinate heatmap
-            pass
-    return match
+    return parasail_match_vector(pred, ref)
 
 def plot_alignment_heatmap(pred_seqs, ref_seqs, max_reads=32, max_len=80):
     n = min(max_reads, len(ref_seqs), len(pred_seqs))
