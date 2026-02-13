@@ -20,6 +20,7 @@ train_ddp_multifolder.py
 """
 
 import os
+import math
 import argparse
 import matplotlib.pyplot as plt
 import logging
@@ -155,25 +156,33 @@ def build_adamw_with_no_decay(named_params, lr: float, weight_decay: float) -> t
 
 def build_scheduler(optimizer, total_steps: int, warmup_steps: int, min_lr: float,
                     logger: Optional[logging.Logger], rank: int):
-    try:
-        from transformers import get_cosine_schedule_with_warmup
-        if logger is not None and rank == 0:
-            logger.info("[Scheduler] Using transformers.get_cosine_schedule_with_warmup")
-        sched = get_cosine_schedule_with_warmup(
-            optimizer,
-            num_warmup_steps=warmup_steps,
-            num_training_steps=total_steps
-        )
-        return sched, "hf_cosine_warmup"
-    except Exception as e:
-        if logger is not None and rank == 0:
-            logger.warning(f"[Scheduler] transformers not available ({e}); fallback to CosineAnnealingLR (NO warmup).")
-        sched = torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer,
-            T_max=max(total_steps, 1),
-            eta_min=min_lr
-        )
-        return sched, "torch_cosine_no_warmup"
+    """
+    Linear warmup + cosine decay with a non-zero floor (min_lr).
+    This keeps behavior stable regardless of transformers version and honors --min_lr.
+    """
+    total_steps = max(int(total_steps), 1)
+    warmup_steps = max(0, min(int(warmup_steps), total_steps - 1))
+
+    base_lr = float(optimizer.param_groups[0]["lr"])
+    if base_lr <= 0:
+        base_lr = 1e-8
+    min_lr = max(0.0, float(min_lr))
+    min_ratio = min(min_lr / base_lr, 1.0)
+
+    def lr_lambda(current_step: int) -> float:
+        step = min(max(int(current_step), 0), total_steps)
+        if warmup_steps > 0 and step < warmup_steps:
+            return float(step) / float(max(1, warmup_steps))
+        if total_steps <= warmup_steps:
+            return 1.0
+        progress = float(step - warmup_steps) / float(max(1, total_steps - warmup_steps))
+        cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
+        return min_ratio + (1.0 - min_ratio) * cosine
+
+    sched = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
+    if logger is not None and rank == 0:
+        logger.info(f"[Scheduler] Using LambdaLR linear_warmup+cosine with min_lr floor (base_lr={base_lr:.6g}, min_lr={min_lr:.6g})")
+    return sched, "lambda_warmup_cosine_minlr"
 
 
 # -------------------- checkpoint helpers --------------------
