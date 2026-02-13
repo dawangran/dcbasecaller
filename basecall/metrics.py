@@ -97,6 +97,22 @@ def ctc_greedy_decode(
     return decoded
 
 
+def ctc_viterbi_decode(
+    logits_tbc: torch.Tensor,
+    input_lengths: Optional[torch.Tensor] = None,
+    blank_idx: int = BLANK_IDX,
+) -> List[List[int]]:
+    """
+    Bonito-style CTC Viterbi path collapse (beamsize=1 equivalent):
+    timestep argmax -> collapse repeats -> remove blank.
+    """
+    return ctc_greedy_decode(
+        logits_tbc=logits_tbc,
+        input_lengths=input_lengths,
+        blank_idx=blank_idx,
+    )
+
+
 
 def _ids_to_bases(ids: List[int], drop_blank: bool = True) -> str:
     bases: List[str] = []

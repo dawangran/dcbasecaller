@@ -39,6 +39,7 @@ from .utils import seed_everything, BLANK_IDX, ID2BASE, resolve_input_lengths
 from .model import BasecallModel
 from .metrics import (
     ctc_greedy_decode,
+    ctc_viterbi_decode,
     koi_beam_search_decode,
     batch_bonito_accuracy,
     plot_curves,
@@ -420,6 +421,12 @@ def eval_one_epoch(
                 input_lengths=input_lengths,
                 blank_idx=BLANK_IDX,
             )
+        elif decoder_mode == "ctc_viterbi":
+            pred_seqs = ctc_viterbi_decode(
+                logits_tbc,
+                input_lengths=input_lengths,
+                blank_idx=BLANK_IDX,
+            )
         else:
             pred_seqs = []
             for idx, input_len in enumerate(input_len_list):
@@ -642,7 +649,7 @@ def parse_args():
                    help="Use Bonito balanced accuracy: (match - ins) / (match + mismatch + del).")
     p.add_argument("--acc_min_coverage", type=float, default=0.0,
                    help="Minimum reference coverage required to count a read for accuracy.")
-    p.add_argument("--train_decoder", choices=["ctc_greedy", "ctc_crf", "koi"], default="ctc_crf",
+    p.add_argument("--train_decoder", choices=["ctc_greedy", "ctc_viterbi", "ctc_crf", "koi"], default="ctc_crf",
                    help="Decoder used for accuracy/blank metrics.")
     p.add_argument("--ctc_crf_state_len", type=int, default=5,
                    help="State length for Bonito CTC-CRF (used to set output classes).")
@@ -898,9 +905,9 @@ def main():
     # curves will reflect only epochs run in this session.
     decoder_mode = args.train_decoder
     if args.head_type == "ctc":
-        if args.train_decoder != "ctc_greedy" and is_main_process(rank):
-            logger.warning("[Decoder] CTC head supports only ctc_greedy, overriding train_decoder.")
-        decoder_mode = "ctc_greedy"
+        if args.train_decoder not in {"ctc_greedy", "ctc_viterbi"} and is_main_process(rank):
+            logger.warning("[Decoder] CTC head supports only ctc_greedy/ctc_viterbi, overriding train_decoder.")
+        decoder_mode = "ctc_viterbi"
 
     if decoder_mode == "ctc_crf":
         if args.head_type != "ctc_crf":
@@ -1091,6 +1098,12 @@ def main():
                 )
             elif decoder_mode == "ctc_greedy":
                 pred_seqs = ctc_greedy_decode(
+                    logits_tbc,
+                    input_lengths=input_lengths,
+                    blank_idx=BLANK_IDX,
+                )
+            elif decoder_mode == "ctc_viterbi":
+                pred_seqs = ctc_viterbi_decode(
                     logits_tbc,
                     input_lengths=input_lengths,
                     blank_idx=BLANK_IDX,
