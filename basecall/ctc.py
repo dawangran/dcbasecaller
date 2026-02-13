@@ -17,7 +17,10 @@ def ctc_loss(
     """
     Plain CTC loss on logits with shape [T, B, C].
     """
-    log_probs = F.log_softmax(logits_tbc, dim=-1)
+    log_probs = F.log_softmax(logits_tbc.to(torch.float32), dim=-1)
+    targets = targets.to(dtype=torch.long)
+    input_lengths = input_lengths.to(dtype=torch.long, device="cpu")
+    target_lengths = target_lengths.to(dtype=torch.long, device="cpu")
     return F.ctc_loss(
         log_probs,
         targets,
