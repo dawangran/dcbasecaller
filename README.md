@@ -83,9 +83,11 @@ basecall-train \
 `--quick` expands to:
 - `--freeze_backbone`
 - `--ctc_crf_state_len 5`
-- `--ctc_crf_blank_score 2`
+- `--ctc_crf_blank_score 0`
 - `--head_output_scale 5`
 - `--head_output_activation tanh`
+- `--head_type ctc_crf`
+- `--pre_ctc_module none`
 
 
 ### Use explicit train/val/test folders (skip auto split, jsonl.gz)
@@ -142,12 +144,19 @@ basecall-train \
 **Head options**
 - `--head_output_activation`: optional activation for head logits (e.g. `tanh` for Bonito-style scaling).
 - `--head_output_scale`: optional scalar multiplier for head logits (applied after activation).
+- `--head_type`: select output head (`ctc` or `ctc_crf`).
+- `--pre_head_type`: optional adapter before CRF head (`none`, `bilstm`, `transformer`).
+- `--pre_ctc_module`: alias of `--pre_head_type`.
+- `--pre_head_transformer_nhead`: attention heads when `--pre_head_type transformer`.
 
 
 **Optimization**
 - `--batch_size`, `--num_epochs`, `--lr`, `--weight_decay`, `--warmup_ratio`, `--min_lr`.
 - `--ctc_crf_state_len`: Bonito CTC-CRF state length (controls CRF head output classes).
 - `--ctc_crf_blank_score`: fixed blank score for CTC-CRF (blank is not trained).
+- `--train_decoder`: choose `ctc_greedy`, `ctc_viterbi`, `ctc_crf` (fp32), or `koi` for accuracy/blank metrics.
+- `--koi_blank_score`: blank score used by Koi beam search when `--train_decoder koi`.
+- `--clip_grad_norm`: gradient clipping threshold (0 disables clipping).
 - `--acc_balanced`: use Bonito balanced accuracy for validation/checkpointing.
 - `--acc_min_coverage`: minimum reference coverage required to count a read for accuracy.
 
@@ -159,10 +168,24 @@ basecall-train \
 
 **DDP/Logging**
 - `--use_wandb`, `--wandb_project`, `--wandb_entity`, `--wandb_run_name`.
+- `--wandb_group`: group related runs (e.g. same experiment family with different conditions).
+- `--wandb_job_type`: run type shown in W&B (default `train`).
 - `--find_unused_parameters`: enable DDP unused parameter detection.
 
+Example for grouped condition sweeps:
+
+```bash
+basecall-train \
+  --jsonl_paths /path/to/data \
+  --model_name_or_path <hf-model> \
+  --use_wandb \
+  --wandb_project DNAmodel_basecall \
+  --wandb_group exp_ctc_vs_crf \
+  --wandb_run_name ctc_crf_prehead_none_lr1e3
+```
+
 **Runtime**
-- `--num_workers`, `--seed`, `--log_interval`, `--output_dir`.
+- `--num_workers`, `--seed`, `--log_interval`, `--output_dir`, `--amp`.
 
 ---
 
@@ -204,6 +227,8 @@ basecall-eval \
 - `--ckpt`: checkpoint path.
 - `--beam_width`: beam width for ont-koi `beam_search`.
 - `--koi_beam_cut`, `--koi_scale`, `--koi_offset`, `--koi_blank_score`, `--koi_reverse`: parameters for the Koi `beam_search` decoder.
+- `--decoder`: choose `auto`, `ctc_greedy`, `ctc_viterbi`, `koi`, or `ctc_crf` for prediction/metrics (`auto`: CTC->`ctc_viterbi`, CTC-CRF->`ctc_crf`).
+- `--head_type`: optional override for checkpoint head type (`ctc` or `ctc_crf`, default auto-infer).
 - `--acc_balanced`: use Bonito balanced accuracy in metrics.
 - `--acc_min_coverage`: minimum reference coverage required to count a read for accuracy.
 - `--batch_size`, `--num_workers`: eval dataloader controls.
@@ -213,6 +238,7 @@ basecall-eval \
 - `--fastq_out`: optional FASTQ output path for predicted sequences.
 - `--fastq_q`: fixed Phred quality value for FASTQ output (default: 20).
 - `--hidden_layer`: which backbone hidden state to use (default: -1).
+- `--pre_head_type`, `--pre_head_transformer_nhead`: optional pre-head module settings (must match training).
 - `--recursive`: scan subfolders for `.jsonl.gz` or tokens/reference `.npy`.
 
 ### Outputs
@@ -241,6 +267,8 @@ basecall-infer \
 - `--koi_offset`: offset applied to scores (default: 0.0).
 - `--koi_blank_score`: blank score used by the decoder (default: 2.0).
 - `--koi_reverse`: reverse output sequence (useful for reverse-complemented models).
+- `--decoder`: choose `auto`, `ctc_greedy`, `ctc_viterbi`, `koi`, or `ctc_crf` for prediction (`auto`: CTC->`ctc_viterbi`, CTC-CRF->`ctc_crf`); CTC-CRF forces fp32 decoding.
+- `--head_type`: optional override for checkpoint head type (`ctc` or `ctc_crf`, default auto-infer).
 
 ### Notes for Bonito-style CTC-CRF training/inference
 
@@ -259,6 +287,7 @@ basecall-infer \
 - `--overlap`: overlap token count between chunks.
 - `--batch_size`: number of reads per inference batch.
 - `--hidden_layer`: which backbone hidden state to use (default: -1).
+- `--pre_head_type`, `--pre_head_transformer_nhead`: optional pre-head module settings (must match training).
 
 **Decoding**
 - `--beam_width`: beam search width.
@@ -273,10 +302,10 @@ basecall-infer \
 
 ## 4.1) Loss and accuracy definitions
 
-- **Training loss** uses Bonito-style CTC-CRF negative log-likelihood (`ctc_crf_loss`) on packed targets with per-read `input_lengths` (derived from `attention_mask`).
-- **Validation/Test accuracy (`acc`)** is Bonito-style alignment accuracy from `koi_beam_search_decode` + parasail alignment (`batch_bonito_accuracy`, unit: %).
+- **Training loss** is head-dependent: `ctc_crf_loss` from `basecall/ctc_crf.py` for `--head_type ctc_crf`, and `ctc_label_smoothing_loss` from `basecall/ctc.py` for `--head_type ctc`.
+- **Validation/Test accuracy (`acc`)** uses the selected decoder (`--train_decoder`) and Bonito-style parasail alignment (`batch_bonito_accuracy`, unit: %).
 - **Balanced accuracy** (`--acc_balanced`) uses `(match - ins) / (match + mismatch + del)`; default uses `match / (match + ins + mismatch + del)`.
-- **CRF decode accuracy (`crf_acc`)** is reported from Viterbi decoding (`ctc_crf.decode`) and uses the same Bonito accuracy function.
+- **CRF decode accuracy (`crf_acc`)** is only reported when `--train_decoder ctc_crf`.
 
 ## 5) Notes
 
