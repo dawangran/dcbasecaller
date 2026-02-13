@@ -154,7 +154,7 @@ basecall-train \
 - `--batch_size`, `--num_epochs`, `--lr`, `--weight_decay`, `--warmup_ratio`, `--min_lr`.
 - `--ctc_crf_state_len`: Bonito CTC-CRF state length (controls CRF head output classes).
 - `--ctc_crf_blank_score`: fixed blank score for CTC-CRF (blank is not trained).
-- `--train_decoder`: choose `ctc_crf` (fp32) or `koi` (fp16 on CUDA) for accuracy/blank metrics.
+- `--train_decoder`: choose `ctc_greedy`, `ctc_crf` (fp32), or `koi` for accuracy/blank metrics.
 - `--koi_blank_score`: blank score used by Koi beam search when `--train_decoder koi`.
 - `--clip_grad_norm`: gradient clipping threshold (0 disables clipping).
 - `--acc_balanced`: use Bonito balanced accuracy for validation/checkpointing.
@@ -227,7 +227,7 @@ basecall-eval \
 - `--ckpt`: checkpoint path.
 - `--beam_width`: beam width for ont-koi `beam_search`.
 - `--koi_beam_cut`, `--koi_scale`, `--koi_offset`, `--koi_blank_score`, `--koi_reverse`: parameters for the Koi `beam_search` decoder.
-- `--decoder`: choose `koi` or `ctc_crf` for prediction/metrics.
+- `--decoder`: choose `ctc_greedy`, `koi`, or `ctc_crf` for prediction/metrics.
 - `--head_type`: optional override for checkpoint head type (`ctc` or `ctc_crf`, default auto-infer).
 - `--acc_balanced`: use Bonito balanced accuracy in metrics.
 - `--acc_min_coverage`: minimum reference coverage required to count a read for accuracy.
@@ -267,7 +267,7 @@ basecall-infer \
 - `--koi_offset`: offset applied to scores (default: 0.0).
 - `--koi_blank_score`: blank score used by the decoder (default: 2.0).
 - `--koi_reverse`: reverse output sequence (useful for reverse-complemented models).
-- `--decoder`: choose `koi` or `ctc_crf` for prediction; CTC-CRF forces fp32 decoding.
+- `--decoder`: choose `ctc_greedy`, `koi`, or `ctc_crf` for prediction; CTC-CRF forces fp32 decoding.
 - `--head_type`: optional override for checkpoint head type (`ctc` or `ctc_crf`, default auto-infer).
 
 ### Notes for Bonito-style CTC-CRF training/inference
@@ -302,7 +302,7 @@ basecall-infer \
 
 ## 4.1) Loss and accuracy definitions
 
-- **Training loss** uses Bonito-style CTC-CRF negative log-likelihood (`ctc_crf_loss`) on packed targets with per-read `input_lengths` (derived from `attention_mask`).
+- **Training loss** is head-dependent: `ctc_crf_loss` for `--head_type ctc_crf`, and `torch.nn.functional.ctc_loss` for `--head_type ctc`.
 - **Validation/Test accuracy (`acc`)** uses the selected decoder (`--train_decoder`) and Bonito-style parasail alignment (`batch_bonito_accuracy`, unit: %).
 - **Balanced accuracy** (`--acc_balanced`) uses `(match - ins) / (match + mismatch + del)`; default uses `match / (match + ins + mismatch + del)`.
 - **CRF decode accuracy (`crf_acc`)** is only reported when `--train_decoder ctc_crf`.

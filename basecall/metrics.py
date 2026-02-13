@@ -66,6 +66,37 @@ def koi_beam_search_decode(
     return decoded
 
 
+def ctc_greedy_decode(
+    logits_tbc: torch.Tensor,
+    input_lengths: Optional[torch.Tensor] = None,
+    blank_idx: int = BLANK_IDX,
+) -> List[List[int]]:
+    if input_lengths is None:
+        lengths = [logits_tbc.shape[0]] * logits_tbc.shape[1]
+    else:
+        lengths = [min(int(x), logits_tbc.shape[0]) for x in input_lengths.cpu().tolist()]
+
+    pred_tbc = torch.argmax(logits_tbc, dim=-1)  # [T, B]
+    decoded: List[List[int]] = []
+    for b, length in enumerate(lengths):
+        if length <= 0:
+            decoded.append([])
+            continue
+        seq = pred_tbc[:length, b].detach().cpu().tolist()
+        out: List[int] = []
+        prev = None
+        for token in seq:
+            token = int(token)
+            if token == blank_idx:
+                prev = token
+                continue
+            if token != prev:
+                out.append(token)
+            prev = token
+        decoded.append(out)
+    return decoded
+
+
 
 def _ids_to_bases(ids: List[int], drop_blank: bool = True) -> str:
     bases: List[str] = []

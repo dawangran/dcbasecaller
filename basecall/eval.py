@@ -37,7 +37,7 @@ from .data_multifolder import (
     create_collate_fn,
 )
 from .ctc_crf import decode as ctc_crf_decode
-from .metrics import koi_beam_search_decode, batch_bonito_accuracy, cal_bonito_accuracy, parasail_error_counts
+from .metrics import ctc_greedy_decode, koi_beam_search_decode, batch_bonito_accuracy, cal_bonito_accuracy, parasail_error_counts
 from .model import BasecallModel
 from .utils import ID2BASE, BLANK_IDX, seed_everything, infer_head_config_from_state_dict, resolve_input_lengths
 from .callback import plot_alignment_heatmap, plot_aligned_heatmap_png, align_sequences_indel_aware
@@ -252,8 +252,8 @@ def main() -> None:
                     help="Blank score used for Koi beam_search decoding.")
     ap.add_argument("--koi_reverse", action="store_true",
                     help="Reverse sequence output for Koi beam_search decoding.")
-    ap.add_argument("--decoder", choices=["koi", "ctc_crf"], default="koi",
-                    help="Decoder to use: koi beam search or CTC-CRF Viterbi.")
+    ap.add_argument("--decoder", choices=["ctc_greedy", "koi", "ctc_crf"], default="koi",
+                    help="Decoder to use: CTC greedy, koi beam search, or CTC-CRF Viterbi.")
     ap.add_argument("--head_type", choices=["ctc", "ctc_crf"], default=None,
                     help="Override head type (default: infer from checkpoint).")
     ap.add_argument("--ctc_crf_state_len", type=int, default=None,
@@ -306,6 +306,8 @@ def main() -> None:
     head_type = args.head_type or head_config.get("head_type", "ctc")
     n_base = len(ID2BASE) - 1
     state_len = args.ctc_crf_state_len
+    if head_type == "ctc" and args.decoder != "ctc_greedy":
+        raise ValueError("CTC head supports only --decoder ctc_greedy.")
     if args.decoder == "ctc_crf":
         if head_type != "ctc_crf":
             raise ValueError("--decoder ctc_crf requires checkpoint/model head_type=ctc_crf.")
@@ -377,6 +379,8 @@ def main() -> None:
         )
         if args.decoder == "ctc_crf":
             pred_ids = _ctc_crf_decode_batch(logits_tbc, input_lengths)
+        elif args.decoder == "ctc_greedy":
+            pred_ids = ctc_greedy_decode(logits_tbc, input_lengths=input_lengths, blank_idx=BLANK_IDX)
         else:
             pred_ids = koi_beam_search_decode(
                 logits_tbc,
