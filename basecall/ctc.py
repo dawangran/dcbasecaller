@@ -15,30 +15,6 @@ def _ctc_alphabet() -> str:
     return "".join(ID2BASE.get(i, "") for i in range(max_id + 1))
 
 
-def ctc_loss(
-    logits_tbc: torch.Tensor,
-    targets: torch.Tensor,
-    input_lengths: torch.Tensor,
-    target_lengths: torch.Tensor,
-    blank_idx: int = 0,
-) -> torch.Tensor:
-    """
-    Plain CTC loss on logits with shape [T, B, C].
-    """
-    log_probs = F.log_softmax(logits_tbc.to(torch.float32), dim=-1)
-    targets = targets.to(dtype=torch.long)
-    input_lengths = input_lengths.to(dtype=torch.long, device="cpu")
-    target_lengths = target_lengths.to(dtype=torch.long, device="cpu")
-    return F.ctc_loss(
-        log_probs,
-        targets,
-        input_lengths,
-        target_lengths,
-        blank=blank_idx,
-        reduction="mean",
-        zero_infinity=True,
-    )
-
 
 def ctc_label_smoothing_loss(
     logits_tbc: torch.Tensor,
@@ -51,32 +27,31 @@ def ctc_label_smoothing_loss(
     """
     Bonito-style CTC + label smoothing loss.
     """
+    del input_lengths  # Bonito style uses full T for each sample.
     log_probs = F.log_softmax(logits_tbc.to(torch.float32), dim=-1)
-    _, batch_size, num_classes = log_probs.shape
+    time_steps, batch_size, num_classes = log_probs.shape
 
     if weights is None:
         weights = torch.cat(
             [torch.tensor([0.4]), (0.1 / max(num_classes - 1, 1)) * torch.ones(max(num_classes - 1, 1))]
         )[:num_classes]
 
-    # Follow Bonito's behavior: CTC input lengths are full T for each sample.
-    full_input_lengths = torch.full(
+    log_probs_lengths = torch.full(
         size=(batch_size,),
-        fill_value=log_probs.shape[0],
-        dtype=torch.long,
+        fill_value=time_steps,
+        dtype=torch.int64,
         device="cpu",
     )
     targets = targets.to(dtype=torch.long)
     target_lengths = target_lengths.to(dtype=torch.long, device="cpu")
 
     base_loss = F.ctc_loss(
-        log_probs,
+        log_probs.to(torch.float32),
         targets,
-        full_input_lengths,
+        log_probs_lengths,
         target_lengths,
         blank=blank_idx,
         reduction="mean",
-        zero_infinity=True,
     )
     label_smooth_loss = -((log_probs * weights.to(log_probs.device)).mean())
     return {
