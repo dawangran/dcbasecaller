@@ -24,7 +24,6 @@ import json
 import os
 from typing import Dict, List, Tuple
 
-import edlib
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
@@ -37,9 +36,10 @@ from .data_multifolder import (
     MultiNpySignalRefDataset,
     create_collate_fn,
 )
-from .metrics import koi_beam_search_decode, batch_bonito_accuracy, cal_bonito_accuracy
+from .ctc_crf import decode as ctc_crf_decode
+from .metrics import ctc_greedy_decode, ctc_viterbi_decode, koi_beam_search_decode, batch_bonito_accuracy, cal_bonito_accuracy, parasail_error_counts
 from .model import BasecallModel
-from .utils import ID2BASE, seed_everything, infer_head_config_from_state_dict, resolve_input_lengths
+from .utils import ID2BASE, BLANK_IDX, seed_everything, infer_head_config_from_state_dict, resolve_input_lengths
 from .callback import plot_alignment_heatmap, plot_aligned_heatmap_png, align_sequences_indel_aware
 
 
@@ -57,20 +57,7 @@ def _parse_cigar(cigar: str) -> List[str]:
 
 
 def error_counts(pred_seq: str, ref_seq: str) -> Dict[str, int]:
-    result = edlib.align(pred_seq, ref_seq, task="path")
-    cigar = result.get("cigar", "")
-    ops = _parse_cigar(cigar) if cigar else []
-    counts = {"match": 0, "mismatch": 0, "ins": 0, "del": 0}
-    for op in ops:
-        if op in {"=", "M"}:
-            counts["match"] += 1
-        elif op == "X":
-            counts["mismatch"] += 1
-        elif op == "I":
-            counts["ins"] += 1
-        elif op == "D":
-            counts["del"] += 1
-    return counts
+    return parasail_error_counts(pred_seq, ref_seq)
 
 
 def merge_counts(total: Dict[str, int], item: Dict[str, int]) -> Dict[str, int]:
@@ -189,7 +176,7 @@ def collect_deletion_positions(true_seq: str, pred_seq: str, out: List[float]) -
 
 
 def load_checkpoint_state(path: str) -> Dict[str, torch.Tensor]:
-    state = torch.load(path, map_location="cpu")
+    state = torch.load(path, map_location="cpu", weights_only=True)
     if isinstance(state, dict):
         for key in ("model_state_dict", "state_dict", "model"):
             if key in state and isinstance(state[key], dict):
@@ -203,6 +190,42 @@ def _parse_path_list(value: str | None) -> List[str]:
     if not value:
         return []
     return [x.strip() for x in value.split(",") if x.strip()]
+
+def _infer_crf_state_len(num_classes: int, n_base: int) -> int:
+    if n_base <= 1:
+        raise ValueError("Cannot infer CTC-CRF state_len with n_base <= 1.")
+    candidates = []
+    if num_classes % (n_base + 1) == 0:
+        base = num_classes / (n_base + 1)
+        state_len = np.log(base) / np.log(n_base)
+        if np.isclose(state_len, round(state_len)):
+            candidates.append(int(round(state_len)))
+    base = np.log(num_classes) / np.log(n_base) - 1
+    if np.isclose(base, round(base)):
+        candidates.append(int(round(base)))
+    if candidates:
+        return candidates[0]
+    raise ValueError(
+        "Unable to infer CTC-CRF state_len from num_classes and n_base. "
+        "Please pass --ctc_crf_state_len or set CTC_CRF_STATE_LEN."
+    )
+
+
+def _ctc_crf_decode_batch(
+    logits_tbc: torch.Tensor,
+    input_lengths: torch.Tensor,
+) -> List[List[int]]:
+    logits_tbc = logits_tbc.float()
+    decoded: List[List[int]] = []
+    for idx, step_len in enumerate(input_lengths.tolist()):
+        if step_len <= 0:
+            decoded.append([])
+            continue
+        sample_logits = logits_tbc[:step_len, idx : idx + 1, :]
+        decoded_ids = ctc_crf_decode(sample_logits, blank_idx=BLANK_IDX)[0]
+        decoded_len = min(len(decoded_ids), step_len)
+        decoded.append(decoded_ids[:decoded_len])
+    return decoded
 
 
 
@@ -229,6 +252,12 @@ def main() -> None:
                     help="Blank score used for Koi beam_search decoding.")
     ap.add_argument("--koi_reverse", action="store_true",
                     help="Reverse sequence output for Koi beam_search decoding.")
+    ap.add_argument("--decoder", choices=["ctc_greedy", "ctc_viterbi", "koi", "ctc_crf"], default="koi",
+                    help="Decoder to use: CTC greedy/viterbi, koi beam search, or CTC-CRF Viterbi.")
+    ap.add_argument("--head_type", choices=["ctc", "ctc_crf"], default=None,
+                    help="Override head type (default: infer from checkpoint).")
+    ap.add_argument("--ctc_crf_state_len", type=int, default=None,
+                    help="Override CTC-CRF state_len (default: infer from head or CTC_CRF_STATE_LEN env).")
     ap.add_argument("--batch_size", type=int, default=4)
     ap.add_argument("--num_workers", type=int, default=0)
     ap.add_argument("--out_dir", type=str, default="eval_out")
@@ -241,6 +270,10 @@ def main() -> None:
                     help="Optional activation applied to head output logits.")
     ap.add_argument("--head_output_scale", type=float, default=None,
                     help="Optional scalar applied to head output logits (after activation).")
+    ap.add_argument("--pre_head_type", choices=["none", "bilstm", "transformer"], default="none",
+                    help="Optional module before CTC-CRF head.")
+    ap.add_argument("--pre_head_transformer_nhead", type=int, default=8,
+                    help="Attention heads for --pre_head_type transformer.")
     ap.add_argument("--acc_balanced", action="store_true",
                     help="Use Bonito balanced accuracy: (match - ins) / (match + mismatch + del).")
     ap.add_argument("--acc_min_coverage", type=float, default=0.0,
@@ -270,15 +303,33 @@ def main() -> None:
 
     state_dict = load_checkpoint_state(args.ckpt)
     head_config = infer_head_config_from_state_dict(state_dict)
+    head_type = args.head_type or head_config.get("head_type", "ctc")
     n_base = len(ID2BASE) - 1
+    state_len = args.ctc_crf_state_len
+    if head_type == "ctc" and args.decoder not in {"ctc_greedy", "ctc_viterbi"}:
+        raise ValueError("CTC head supports only --decoder ctc_greedy or ctc_viterbi.")
+    if args.decoder == "ctc_crf":
+        if head_type != "ctc_crf":
+            raise ValueError("--decoder ctc_crf requires checkpoint/model head_type=ctc_crf.")
+        if state_len is None:
+            env_state_len = os.environ.get("CTC_CRF_STATE_LEN")
+            if env_state_len is not None:
+                state_len = int(env_state_len)
+        if state_len is None:
+            state_len = _infer_crf_state_len(head_config["num_classes"], n_base)
+        os.environ["CTC_CRF_STATE_LEN"] = str(state_len)
     model = BasecallModel(
         model_path=args.model_name_or_path,
         num_classes=head_config["num_classes"],
         hidden_layer=args.hidden_layer,
         head_output_activation=args.head_output_activation,
         head_output_scale=args.head_output_scale,
+        pre_head_type=args.pre_head_type,
+        pre_head_transformer_nhead=args.pre_head_transformer_nhead,
+        head_type=head_type,
         head_crf_blank_score=float(args.koi_blank_score),
         head_crf_n_base=n_base,
+        head_crf_state_len=state_len,
         head_crf_expand_blanks=True,
     ).to(device)
     model.load_state_dict(state_dict, strict=False)
@@ -317,7 +368,7 @@ def main() -> None:
         if attention_mask is not None:
             attention_mask = attention_mask.to(device)
 
-        with torch.cuda.amp.autocast(enabled=use_amp):
+        with torch.amp.autocast(device_type=device.type, enabled=use_amp):
             logits_btc = model(input_ids, attention_mask=attention_mask)
 
         logits_tbc = logits_btc.transpose(0, 1)
@@ -326,16 +377,23 @@ def main() -> None:
             attention_mask=attention_mask,
             input_lengths=batch.get("input_lengths"),
         )
-        pred_ids = koi_beam_search_decode(
-            logits_tbc,
-            beam_width=args.beam_width,
-            beam_cut=args.koi_beam_cut,
-            scale=args.koi_scale,
-            offset=args.koi_offset,
-            blank_score=args.koi_blank_score,
-            reverse=args.koi_reverse,
-            input_lengths=input_lengths,
-        )
+        if args.decoder == "ctc_crf":
+            pred_ids = _ctc_crf_decode_batch(logits_tbc, input_lengths)
+        elif args.decoder == "ctc_greedy":
+            pred_ids = ctc_greedy_decode(logits_tbc, input_lengths=input_lengths, blank_idx=BLANK_IDX)
+        elif args.decoder == "ctc_viterbi":
+            pred_ids = ctc_viterbi_decode(logits_tbc, input_lengths=input_lengths, blank_idx=BLANK_IDX)
+        else:
+            pred_ids = koi_beam_search_decode(
+                logits_tbc,
+                beam_width=args.beam_width,
+                beam_cut=args.koi_beam_cut,
+                scale=args.koi_scale,
+                offset=args.koi_offset,
+                blank_score=args.koi_blank_score,
+                reverse=args.koi_reverse,
+                input_lengths=input_lengths,
+            )
         ref_ids = batch["target_seqs"]
 
         acc = batch_bonito_accuracy(

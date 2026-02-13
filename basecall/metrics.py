@@ -15,6 +15,7 @@ from collections import defaultdict, OrderedDict
 
 
 from .utils import BLANK_IDX, ID2BASE, BASE2ID
+from .ctc import decode as ctc_decode
 
 
 _SPLIT_CIGAR = re.compile(r"(?P<len>\d+)(?P<op>\D+)")
@@ -64,6 +65,49 @@ def koi_beam_search_decode(
         seq_str = sequence if isinstance(sequence[0], str) else to_str(sequence[0])
         decoded.append([BASE2ID.get(base, BLANK_IDX) for base in seq_str])
     return decoded
+
+
+def ctc_greedy_decode(
+    logits_tbc: torch.Tensor,
+    input_lengths: Optional[torch.Tensor] = None,
+    blank_idx: int = BLANK_IDX,
+) -> List[List[int]]:
+    if input_lengths is None:
+        lengths = [logits_tbc.shape[0]] * logits_tbc.shape[1]
+    else:
+        lengths = [min(int(x), logits_tbc.shape[0]) for x in input_lengths.cpu().tolist()]
+
+    pred_tbc = torch.argmax(logits_tbc, dim=-1)  # [T, B]
+    decoded: List[List[int]] = []
+    for b, length in enumerate(lengths):
+        if length <= 0:
+            decoded.append([])
+            continue
+        seq = pred_tbc[:length, b].detach().cpu().tolist()
+        out: List[int] = []
+        prev = None
+        for token in seq:
+            token = int(token)
+            if token == blank_idx:
+                prev = token
+                continue
+            if token != prev:
+                out.append(token)
+            prev = token
+        decoded.append(out)
+    return decoded
+
+
+def ctc_viterbi_decode(
+    logits_tbc: torch.Tensor,
+    input_lengths: Optional[torch.Tensor] = None,
+    blank_idx: int = BLANK_IDX,
+) -> List[List[int]]:
+    """
+    Bonito-style CTC Viterbi path collapse (beamsize=1 equivalent):
+    timestep argmax -> collapse repeats -> remove blank.
+    """
+    return ctc_decode(logits_tbc=logits_tbc, input_lengths=input_lengths, blank_idx=blank_idx)
 
 
 
@@ -120,22 +164,60 @@ def cal_bonito_accuracy(pred_seq, ref_seq, balanced=False, min_coverage=0.0):
     if len(ref_seq) == 0:
         return 0.0
 
-    q_coverage = len(alignment.traceback.query) / max(len(pred_seq), 1)
-    r_coverage = len(alignment.traceback.ref) / max(len(ref_seq), 1)
-
-    if r_coverage < min_coverage:
-        return 0.0
-
     _, cigar = parasail_to_sam(alignment, pred_seq)
 
     for count, op in re.findall(_SPLIT_CIGAR, cigar):
         counts[op] += int(count)
+
+    r_coverage = len(alignment.traceback.ref) / max(len(ref_seq), 1)
+    if r_coverage < min_coverage:
+        return 0.0
 
     if balanced:
         accuracy = (counts['='] - counts['I']) / (counts['='] + counts['X'] + counts['D'])
     else:
         accuracy = counts['='] / (counts['='] + counts['I'] + counts['X'] + counts['D'])
     return accuracy * 100
+
+
+def parasail_error_counts(pred_seq: str, ref_seq: str) -> Dict[str, int]:
+    """
+    Return cigar-derived counts from parasail alignment using the same rules as cal_bonito_accuracy.
+    """
+    counts = defaultdict(int)
+    if len(ref_seq) == 0:
+        return {"match": 0, "mismatch": 0, "ins": 0, "del": 0}
+    alignment = parasail.sw_trace_striped_32(pred_seq, ref_seq, 8, 4, parasail.dnafull)
+    _, cigar = parasail_to_sam(alignment, pred_seq)
+    for count, op in re.findall(_SPLIT_CIGAR, cigar):
+        counts[op] += int(count)
+    return {
+        "match": int(counts.get("=", 0)),
+        "mismatch": int(counts.get("X", 0)),
+        "ins": int(counts.get("I", 0)),
+        "del": int(counts.get("D", 0)),
+    }
+
+
+def parasail_match_vector(pred_seq: str, ref_seq: str) -> List[int]:
+    """
+    Build a reference-coordinate match vector (1=match, 0=mismatch/delete) from parasail CIGAR.
+    Insertions and soft clips do not consume reference positions and are ignored.
+    """
+    if len(ref_seq) == 0:
+        return []
+    alignment = parasail.sw_trace_striped_32(pred_seq, ref_seq, 8, 4, parasail.dnafull)
+    _, cigar = parasail_to_sam(alignment, pred_seq)
+    match: List[int] = []
+    for count, op in re.findall(_SPLIT_CIGAR, cigar):
+        span = int(count)
+        if op == "=":
+            match.extend([1] * span)
+        elif op in {"X", "D"}:
+            match.extend([0] * span)
+        else:
+            continue
+    return match
 
 
 def batch_bonito_accuracy(
