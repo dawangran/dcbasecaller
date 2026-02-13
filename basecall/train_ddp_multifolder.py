@@ -27,7 +27,6 @@ from typing import Tuple, Optional, Any, Dict, List
 import numpy as np
 
 import torch
-import torch.nn.functional as F
 from torch.amp import autocast, GradScaler
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -47,6 +46,7 @@ from .metrics import (
 )
 from .ctc_crf import decode as ctc_crf_decode
 from .ctc_crf import ctc_crf_loss
+from .ctc import ctc_loss as plain_ctc_loss
 from .data_multifolder import (
     scan_jsonl_files,
     split_jsonl_files_by_group,
@@ -300,15 +300,12 @@ def train_one_epoch(
                     blank_idx=BLANK_IDX,
                 )
             else:
-                log_probs = F.log_softmax(logits_tbc, dim=-1)
-                loss = F.ctc_loss(
-                    log_probs,
+                loss = plain_ctc_loss(
+                    logits_tbc,
                     target_labels,
                     input_lengths,
                     target_lengths,
-                    blank=BLANK_IDX,
-                    reduction="mean",
-                    zero_infinity=True,
+                    blank_idx=BLANK_IDX,
                 )
         if torch.isfinite(loss):
             if use_amp:
@@ -395,15 +392,12 @@ def eval_one_epoch(
                 blank_idx=BLANK_IDX,
             )
         else:
-            log_probs = F.log_softmax(logits_tbc, dim=-1)
-            loss = F.ctc_loss(
-                log_probs,
+            loss = plain_ctc_loss(
+                logits_tbc,
                 target_labels,
                 input_lengths,
                 target_lengths,
-                blank=BLANK_IDX,
-                reduction="mean",
-                zero_infinity=True,
+                blank_idx=BLANK_IDX,
             )
         
         total_loss += float(loss.item())
