@@ -107,7 +107,7 @@ def ctc_viterbi_decode(
     Bonito-style CTC Viterbi path collapse (beamsize=1 equivalent):
     timestep argmax -> collapse repeats -> remove blank.
     """
-    return ctc_decode(logits_tbc=logits_tbc, input_lengths=input_lengths, blank_idx=blank_idx)
+    return ctc_decode(logits_tbc=logits_tbc, input_lengths=input_lengths, blank_idx=blank_idx, beamsize=1)
 
 
 

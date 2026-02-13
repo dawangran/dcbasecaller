@@ -46,7 +46,7 @@ from .metrics import (
 )
 from .ctc_crf import decode as ctc_crf_decode
 from .ctc_crf import ctc_crf_loss
-from .ctc import ctc_loss as plain_ctc_loss
+from .ctc import ctc_label_smoothing_loss
 from .data_multifolder import (
     scan_jsonl_files,
     split_jsonl_files_by_group,
@@ -306,13 +306,14 @@ def train_one_epoch(
                     blank_idx=BLANK_IDX,
                 )
             else:
-                loss = plain_ctc_loss(
+                ctc_loss_dict = ctc_label_smoothing_loss(
                     logits_tbc,
                     target_labels,
                     input_lengths,
                     target_lengths,
                     blank_idx=BLANK_IDX,
                 )
+                loss = ctc_loss_dict["total_loss"]
         if torch.isfinite(loss):
             if use_amp:
                 scaler.scale(loss).backward()
@@ -398,13 +399,14 @@ def eval_one_epoch(
                 blank_idx=BLANK_IDX,
             )
         else:
-            loss = plain_ctc_loss(
+            ctc_loss_dict = ctc_label_smoothing_loss(
                 logits_tbc,
                 target_labels,
                 input_lengths,
                 target_lengths,
                 blank_idx=BLANK_IDX,
             )
+            loss = ctc_loss_dict["total_loss"]
         
         total_loss += float(loss.item())
         n_batches += 1

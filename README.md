@@ -302,7 +302,7 @@ basecall-infer \
 
 ## 4.1) Loss and accuracy definitions
 
-- **Training loss** is head-dependent: `ctc_crf_loss` from `basecall/ctc_crf.py` for `--head_type ctc_crf`, and `ctc_loss` from `basecall/ctc.py` for `--head_type ctc`.
+- **Training loss** is head-dependent: `ctc_crf_loss` from `basecall/ctc_crf.py` for `--head_type ctc_crf`, and `ctc_label_smoothing_loss` from `basecall/ctc.py` for `--head_type ctc`.
 - **Validation/Test accuracy (`acc`)** uses the selected decoder (`--train_decoder`) and Bonito-style parasail alignment (`batch_bonito_accuracy`, unit: %).
 - **Balanced accuracy** (`--acc_balanced`) uses `(match - ins) / (match + mismatch + del)`; default uses `match / (match + ins + mismatch + del)`.
 - **CRF decode accuracy (`crf_acc`)** is only reported when `--train_decoder ctc_crf`.
