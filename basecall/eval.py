@@ -37,7 +37,7 @@ from .data_multifolder import (
     create_collate_fn,
 )
 from .ctc_crf import decode as ctc_crf_decode
-from .metrics import ctc_greedy_decode, ctc_viterbi_decode, koi_beam_search_decode, batch_bonito_accuracy, cal_bonito_accuracy, parasail_error_counts
+from .metrics import ctc_viterbi_decode, koi_beam_search_decode, batch_bonito_accuracy, cal_bonito_accuracy, parasail_error_counts
 from .model import BasecallModel
 from .utils import ID2BASE, BLANK_IDX, seed_everything, infer_head_config_from_state_dict, resolve_input_lengths
 from .callback import plot_alignment_heatmap, plot_aligned_heatmap_png, align_sequences_indel_aware
@@ -252,7 +252,7 @@ def main() -> None:
                     help="Blank score used for Koi beam_search decoding.")
     ap.add_argument("--koi_reverse", action="store_true",
                     help="Reverse sequence output for Koi beam_search decoding.")
-    ap.add_argument("--decoder", choices=["auto", "ctc_greedy", "ctc_viterbi", "koi", "ctc_crf"], default="auto",
+    ap.add_argument("--decoder", choices=["auto", "ctc_viterbi", "koi", "ctc_crf"], default="auto",
                     help="Decoder to use. auto picks ctc_viterbi for CTC head and ctc_crf for CTC-CRF head.")
     ap.add_argument("--head_type", choices=["ctc", "ctc_crf"], default=None,
                     help="Override head type (default: infer from checkpoint).")
@@ -310,8 +310,8 @@ def main() -> None:
     if decoder_mode == "auto":
         decoder_mode = "ctc_viterbi" if head_type == "ctc" else "ctc_crf"
 
-    if head_type == "ctc" and decoder_mode not in {"ctc_greedy", "ctc_viterbi"}:
-        raise ValueError("CTC head supports only --decoder ctc_greedy or ctc_viterbi (or auto).")
+    if head_type == "ctc" and decoder_mode not in {"ctc_viterbi"}:
+        raise ValueError("CTC head supports only --decoder ctc_viterbi (or auto).")
     if decoder_mode == "ctc_crf":
         if head_type != "ctc_crf":
             raise ValueError("--decoder ctc_crf requires checkpoint/model head_type=ctc_crf.")
@@ -383,8 +383,6 @@ def main() -> None:
         )
         if decoder_mode == "ctc_crf":
             pred_ids = _ctc_crf_decode_batch(logits_tbc, input_lengths)
-        elif decoder_mode == "ctc_greedy":
-            pred_ids = ctc_greedy_decode(logits_tbc, input_lengths=input_lengths, blank_idx=BLANK_IDX)
         elif decoder_mode == "ctc_viterbi":
             pred_ids = ctc_viterbi_decode(logits_tbc, input_lengths=input_lengths, blank_idx=BLANK_IDX)
         else:

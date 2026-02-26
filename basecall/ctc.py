@@ -19,7 +19,6 @@ def _ctc_alphabet() -> str:
 def ctc_label_smoothing_loss(
     logits_tbc: torch.Tensor,
     targets: torch.Tensor,
-    input_lengths: torch.Tensor,
     target_lengths: torch.Tensor,
     blank_idx: int = 0,
     weights: Optional[torch.Tensor] = None,
@@ -27,7 +26,6 @@ def ctc_label_smoothing_loss(
     """
     Bonito-style CTC + label smoothing loss.
     """
-    del input_lengths  # Bonito style uses full T for each sample.
     log_probs = F.log_softmax(logits_tbc.to(torch.float32), dim=-1)
     time_steps, batch_size, num_classes = log_probs.shape
 
