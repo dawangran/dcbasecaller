@@ -190,6 +190,8 @@ def main():
                     help="Offset applied to scores for Koi beam_search decoding.")
     ap.add_argument("--koi_blank_score", type=float, default=2.0,
                     help="Blank score used for Koi beam_search decoding.")
+    ap.add_argument("--ctc_crf_blank_score", type=float, default=2.0,
+                    help="Blank score used by CTC-CRF head logits (keep consistent with training).")
     ap.add_argument("--koi_reverse", action="store_true",
                     help="Reverse sequence output for Koi beam_search decoding.")
     ap.add_argument("--decoder", choices=["auto", "ctc_viterbi", "koi", "ctc_crf"], default="auto",
@@ -259,7 +261,7 @@ def main():
         pre_head_type=args.pre_head_type,
         pre_head_transformer_nhead=args.pre_head_transformer_nhead,
         head_type=head_type,
-        head_crf_blank_score=float(args.koi_blank_score),
+        head_crf_blank_score=float(args.ctc_crf_blank_score),
         head_crf_n_base=n_base,
         head_crf_state_len=state_len,
         head_crf_expand_blanks=True,

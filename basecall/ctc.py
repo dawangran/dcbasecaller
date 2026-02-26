@@ -65,7 +65,6 @@ def decode(
     blank_idx: int = 0,
     beamsize: int = 1,
     threshold: float = 1e-3,
-    qscores: bool = False,
 ) -> List[List[int]]:
     """
     Bonito-style decode via fast_ctc_decode.
@@ -88,7 +87,7 @@ def decode(
             continue
 
         probs = posteriors[:length, b, :].detach().cpu().numpy().astype(np.float32)
-        if beamsize == 1 or qscores:
+        if beamsize == 1:
             seq, _path = viterbi_search(probs, alphabet)
         else:
             seq, _path = beam_search(
