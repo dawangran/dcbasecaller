@@ -269,7 +269,7 @@ def main() -> None:
     ap.add_argument("--fastq_q", type=int, default=20)
     ap.add_argument("--hidden_layer", type=int, default=-1,
                     help="Which backbone hidden layer to use when --feature_source hidden.")
-    ap.add_argument("--feature_source", choices=["hidden", "embedding"], default="hidden",
+    ap.add_argument("--feature_source", "--feature-source", choices=["hidden", "embedding"], default="hidden",
                     help="Use transformer hidden states or input embeddings as head input features.")
     ap.add_argument("--head_output_activation", choices=["tanh", "relu"], default=None,
                     help="Optional activation applied to head output logits.")

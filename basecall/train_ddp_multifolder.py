@@ -572,7 +572,7 @@ def parse_args():
 
     p.add_argument("--model_name_or_path", type=str, required=True)
     p.add_argument("--hidden-layer",type=int,default=-1, help="Which backbone hidden layer to use when --feature_source hidden (-1=last, -2=second last, etc.)")
-    p.add_argument("--feature_source", choices=["hidden", "embedding"], default="hidden",
+    p.add_argument("--feature_source", "--feature-source", choices=["hidden", "embedding"], default="hidden",
                    help="Use transformer hidden states or input embeddings as head input features.")
 
 

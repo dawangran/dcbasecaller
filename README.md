@@ -136,7 +136,7 @@ basecall-train \
 **Model & freezing**
 - `--model_name_or_path`: HuggingFace model ID or local path.
 - `--hidden-layer`: which hidden layer to use when `--feature_source hidden` (`-1` = last, `-2` = second last).
-- `--feature_source`: choose `hidden` (default) or `embedding` (`self.backbone.get_input_embeddings()`).
+- `--feature_source`/`--feature-source`: choose `hidden` (default) or `embedding` (`self.backbone.get_input_embeddings()`).
 - `--freeze_backbone`: freeze backbone, train head only.
 - `--reset_backbone_weights`: reinitialize backbone weights for ablation.
 - `--unfreeze_last_n_layers`: unfreeze last N transformer layers.
@@ -240,7 +240,7 @@ basecall-eval \
 - `--fastq_out`: optional FASTQ output path for predicted sequences.
 - `--fastq_q`: fixed Phred quality value for FASTQ output (default: 20).
 - `--hidden_layer`: which backbone hidden state to use when `--feature_source hidden` (default: -1).
-- `--feature_source`: choose `hidden` (default) or `embedding` for model features before pre-head/head.
+- `--feature_source`/`--feature-source`: choose `hidden` (default) or `embedding` for model features before pre-head/head.
 - `--pre_head_type`, `--pre_head_transformer_nhead`: optional pre-head module settings (must match training).
 - `--recursive`: scan subfolders for `.jsonl.gz` or tokens/reference `.npy`.
 
@@ -291,7 +291,7 @@ basecall-infer \
 - `--overlap`: overlap token count between chunks.
 - `--batch_size`: number of reads per inference batch.
 - `--hidden_layer`: which backbone hidden state to use when `--feature_source hidden` (default: -1).
-- `--feature_source`: choose `hidden` (default) or `embedding` for model features before pre-head/head.
+- `--feature_source`/`--feature-source`: choose `hidden` (default) or `embedding` for model features before pre-head/head.
 - `--pre_head_type`, `--pre_head_transformer_nhead`: optional pre-head module settings (must match training).
 
 **Decoding**
