@@ -154,6 +154,7 @@ class BasecallModel(nn.Module):
         model_path: str,
         num_classes: int = NUM_CLASSES,
         hidden_layer: int = -1,          # 选哪一层 hidden_states
+        feature_source: str = "hidden",   # hidden | embedding
         freeze_backbone: bool = False,   # ✅ 新增：是否冻结基座（默认不冻结，保持你原行为）
         reset_backbone_weights: bool = False,  # ✅ 可选：重置基座权重用于消融
         unfreeze_last_n_layers: int = 0,  # 可选：仅解冻最后 N 层（其余保持冻结）
@@ -171,6 +172,7 @@ class BasecallModel(nn.Module):
     ):
         super().__init__()
         self.hidden_layer = hidden_layer
+        self.feature_source = feature_source
         self.freeze_backbone = bool(freeze_backbone)
         self.unfreeze_last_n_layers = max(0, int(unfreeze_last_n_layers))
         self.unfreeze_layer_start = unfreeze_layer_start
@@ -194,6 +196,9 @@ class BasecallModel(nn.Module):
                 model_path,
                 trust_remote_code=True,
             )
+
+        if self.feature_source not in {"hidden", "embedding"}:
+            raise ValueError(f"Unsupported feature_source: {self.feature_source}. Use 'hidden' or 'embedding'.")
 
         # 省显存：关闭 cache（很多 decoder-only 默认开）
         if hasattr(self.backbone.config, "use_cache"):
@@ -336,22 +341,28 @@ class BasecallModel(nn.Module):
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        outputs = self.backbone(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            output_hidden_states=True,
-            return_dict=True,
-        )
-
-        hidden_states = outputs.hidden_states  # tuple(len = n_layers + 1)
-
-        try:
-            hidden = hidden_states[self.hidden_layer]
-        except IndexError:
-            raise ValueError(
-                f"hidden_layer={self.hidden_layer} out of range "
-                f"(num hidden states = {len(hidden_states)})"
+        if self.feature_source == "embedding":
+            embedding_layer = self.backbone.get_input_embeddings()
+            if embedding_layer is None:
+                raise ValueError("Backbone does not expose input embeddings via get_input_embeddings().")
+            hidden = embedding_layer(input_ids)
+        else:
+            outputs = self.backbone(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                output_hidden_states=True,
+                return_dict=True,
             )
+
+            hidden_states = outputs.hidden_states  # tuple(len = n_layers + 1)
+
+            try:
+                hidden = hidden_states[self.hidden_layer]
+            except IndexError:
+                raise ValueError(
+                    f"hidden_layer={self.hidden_layer} out of range "
+                    f"(num hidden states = {len(hidden_states)})"
+                )
 
         hidden = self.pre_head(hidden)
         logits_btc = self.base_head(hidden)

@@ -571,7 +571,9 @@ def parse_args():
     p.add_argument("--split_seed", type=int, default=42)
 
     p.add_argument("--model_name_or_path", type=str, required=True)
-    p.add_argument("--hidden-layer",type=int,default=-1, help="Which backbone hidden layer to use for CTC (-1=last, -2=second last, etc.)")
+    p.add_argument("--hidden-layer",type=int,default=-1, help="Which backbone hidden layer to use when --feature_source hidden (-1=last, -2=second last, etc.)")
+    p.add_argument("--feature_source", choices=["hidden", "embedding"], default="hidden",
+                   help="Use transformer hidden states or input embeddings as head input features.")
 
 
     p.add_argument("--pretrained_ckpt", type=str, default=None,
@@ -690,6 +692,7 @@ def main():
         logger.info(f"[DDP] world_size={world_size}, rank={rank}, local_rank={local_rank}, device={device}")
         logger.info(f"[Args] {vars(args)}")
         logger.info(f"[PreHead] type={args.pre_head_type} transformer_nhead={args.pre_head_transformer_nhead}")
+        logger.info(f"[FeatureSource] source={args.feature_source} hidden_layer={args.hidden_layer}")
         if args.quick:
             logger.info("[Quick] enabled: freeze_backbone=True, ctc_crf_state_len=5, ctc_crf_blank_score=0, head_output_scale=5, head_output_activation=tanh, head_type=ctc_crf, pre_ctc_module=none")
 
@@ -709,6 +712,7 @@ def main():
         model_path=args.model_name_or_path,
         num_classes=num_classes if num_classes is not None else None,
         hidden_layer=args.hidden_layer,
+        feature_source=args.feature_source,
         freeze_backbone=bool(args.freeze_backbone),
         reset_backbone_weights=bool(args.reset_backbone_weights),
         unfreeze_last_n_layers=args.unfreeze_last_n_layers,

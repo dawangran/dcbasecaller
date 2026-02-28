@@ -267,7 +267,10 @@ def main() -> None:
     ap.add_argument("--max_len", type=int, default=200)
     ap.add_argument("--fastq_out", type=str, default=None)
     ap.add_argument("--fastq_q", type=int, default=20)
-    ap.add_argument("--hidden_layer", type=int, default=-1)
+    ap.add_argument("--hidden_layer", type=int, default=-1,
+                    help="Which backbone hidden layer to use when --feature_source hidden.")
+    ap.add_argument("--feature_source", choices=["hidden", "embedding"], default="hidden",
+                    help="Use transformer hidden states or input embeddings as head input features.")
     ap.add_argument("--head_output_activation", choices=["tanh", "relu"], default=None,
                     help="Optional activation applied to head output logits.")
     ap.add_argument("--head_output_scale", type=float, default=None,
@@ -328,6 +331,7 @@ def main() -> None:
         model_path=args.model_name_or_path,
         num_classes=head_config["num_classes"],
         hidden_layer=args.hidden_layer,
+        feature_source=args.feature_source,
         head_output_activation=args.head_output_activation,
         head_output_scale=args.head_output_scale,
         pre_head_type=args.pre_head_type,
