@@ -3,7 +3,7 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers import AutoTokenizer, AutoModel
+from transformers import AutoTokenizer, AutoModel, AutoConfig
 
 from .utils import NUM_CLASSES, ID2BASE
 
@@ -66,6 +66,84 @@ class LinearCRFEncoder(nn.Module):
         return scores
 
 
+
+
+class LinearCTCEncoder(nn.Module):
+    def __init__(
+        self,
+        insize: int,
+        num_classes: int,
+        bias: bool = True,
+        scale: float | None = None,
+        activation: str | None = None,
+    ) -> None:
+        super().__init__()
+        self.scale = scale
+        self.proj = nn.Linear(insize, num_classes, bias=bias)
+        if activation is None:
+            self.activation = None
+        elif activation == "tanh":
+            self.activation = torch.tanh
+        elif activation == "relu":
+            self.activation = torch.relu
+        elif activation == "gelu":
+            self.activation = torch.nn.functional.gelu
+        else:
+            raise ValueError(f"Unknown activation: {activation}")
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        logits = self.proj(x)
+        if self.activation is not None:
+            logits = self.activation(logits)
+        if self.scale is not None:
+            logits = logits * self.scale
+        return logits
+
+class IdentityPreHead(nn.Module):
+    def __init__(self, model_dim: int) -> None:
+        super().__init__()
+        self.output_dim = model_dim
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x
+
+
+class BiLSTMPreHead(nn.Module):
+    def __init__(self, input_dim: int, hidden_dim: int = 128) -> None:
+        super().__init__()
+        self.lstm = nn.LSTM(
+            input_size=input_dim,
+            hidden_size=hidden_dim,
+            num_layers=1,
+            batch_first=True,
+            bidirectional=True,
+        )
+        self.output_dim = hidden_dim * 2
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        out, _ = self.lstm(x)
+        return out
+
+
+class TransformerPreHead(nn.Module):
+    def __init__(self, model_dim: int, nhead: int = 8, dim_feedforward: int | None = None) -> None:
+        super().__init__()
+        ff = dim_feedforward if dim_feedforward is not None else model_dim * 4
+        self.layer = nn.TransformerEncoderLayer(
+            d_model=model_dim,
+            nhead=nhead,
+            dim_feedforward=ff,
+            dropout=0.1,
+            batch_first=True,
+            activation="gelu",
+        )
+        self.encoder = nn.TransformerEncoder(self.layer, num_layers=1)
+        self.output_dim = model_dim
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.encoder(x)
+
+
 class BasecallModel(nn.Module):
     """
     input_ids: [B, T]
@@ -76,6 +154,7 @@ class BasecallModel(nn.Module):
         model_path: str,
         num_classes: int = NUM_CLASSES,
         hidden_layer: int = -1,          # 选哪一层 hidden_states
+        feature_source: str = "hidden",   # hidden | embedding
         freeze_backbone: bool = False,   # ✅ 新增：是否冻结基座（默认不冻结，保持你原行为）
         reset_backbone_weights: bool = False,  # ✅ 可选：重置基座权重用于消融
         unfreeze_last_n_layers: int = 0,  # 可选：仅解冻最后 N 层（其余保持冻结）
@@ -87,9 +166,13 @@ class BasecallModel(nn.Module):
         head_crf_n_base: int | None = None,
         head_crf_state_len: int | None = None,
         head_crf_expand_blanks: bool = True,
+        pre_head_type: str = "none",
+        pre_head_transformer_nhead: int = 8,
+        head_type: str = "ctc_crf",
     ):
         super().__init__()
         self.hidden_layer = hidden_layer
+        self.feature_source = feature_source
         self.freeze_backbone = bool(freeze_backbone)
         self.unfreeze_last_n_layers = max(0, int(unfreeze_last_n_layers))
         self.unfreeze_layer_start = unfreeze_layer_start
@@ -99,15 +182,23 @@ class BasecallModel(nn.Module):
             model_path, trust_remote_code=True
         )
 
-        self.backbone = AutoModel.from_pretrained(
-            model_path,
-            trust_remote_code=True,
-        )
         if reset_backbone_weights:
-            if hasattr(self.backbone, "init_weights"):
-                self.backbone.init_weights()
-            else:
-                self.backbone.apply(self._init_backbone_weights)
+            backbone_config = AutoConfig.from_pretrained(
+                model_path,
+                trust_remote_code=True,
+            )
+            self.backbone = AutoModel.from_config(
+                backbone_config,
+                trust_remote_code=True,
+            )
+        else:
+            self.backbone = AutoModel.from_pretrained(
+                model_path,
+                trust_remote_code=True,
+            )
+
+        if self.feature_source not in {"hidden", "embedding"}:
+            raise ValueError(f"Unsupported feature_source: {self.feature_source}. Use 'hidden' or 'embedding'.")
 
         # 省显存：关闭 cache（很多 decoder-only 默认开）
         if hasattr(self.backbone.config, "use_cache"):
@@ -152,25 +243,61 @@ class BasecallModel(nn.Module):
         if num_classes is None:
             num_classes = NUM_CLASSES
 
-        n_base = head_crf_n_base if head_crf_n_base is not None else (len(ID2BASE) - 1)
-        if head_crf_state_len is None:
-            if n_base <= 1:
-                raise ValueError("Cannot infer head_crf_state_len with n_base <= 1.")
-            base = num_classes / (n_base + 1)
-            state_len = math.log(base, n_base) - 1
-            if not math.isclose(state_len, round(state_len)):
-                raise ValueError("Unable to infer head_crf_state_len from num_classes and n_base.")
-            head_crf_state_len = int(round(state_len))
-        self.base_head = LinearCRFEncoder(
-            insize=hidden_size,
-            n_base=n_base,
-            state_len=head_crf_state_len,
-            bias=True,
-            scale=head_output_scale,
-            activation=head_output_activation,
-            blank_score=head_crf_blank_score,
-            expand_blanks=head_crf_expand_blanks,
+        self.head_type = head_type
+        self.pre_head = self._build_pre_head(
+            pre_head_type=pre_head_type,
+            hidden_size=hidden_size,
+            transformer_nhead=pre_head_transformer_nhead,
         )
+
+        if self.head_type == "ctc_crf":
+            n_base = head_crf_n_base if head_crf_n_base is not None else (len(ID2BASE) - 1)
+            if head_crf_state_len is None:
+                if n_base <= 1:
+                    raise ValueError("Cannot infer head_crf_state_len with n_base <= 1.")
+                base = num_classes / (n_base + 1)
+                state_len = math.log(base, n_base) - 1
+                if not math.isclose(state_len, round(state_len)):
+                    raise ValueError("Unable to infer head_crf_state_len from num_classes and n_base.")
+                head_crf_state_len = int(round(state_len))
+            self.base_head = LinearCRFEncoder(
+                insize=self.pre_head.output_dim,
+                n_base=n_base,
+                state_len=head_crf_state_len,
+                bias=True,
+                scale=head_output_scale,
+                activation=head_output_activation,
+                blank_score=head_crf_blank_score,
+                expand_blanks=head_crf_expand_blanks,
+            )
+        elif self.head_type == "ctc":
+            self.base_head = LinearCTCEncoder(
+                insize=self.pre_head.output_dim,
+                num_classes=num_classes,
+                bias=True,
+                scale=head_output_scale,
+                activation=head_output_activation,
+            )
+        else:
+            raise ValueError(f"Unsupported head_type: {self.head_type}")
+
+    @staticmethod
+    def _build_pre_head(
+        pre_head_type: str,
+        hidden_size: int,
+        transformer_nhead: int,
+    ) -> nn.Module:
+        if pre_head_type == "none":
+            return IdentityPreHead(hidden_size)
+        if pre_head_type == "bilstm":
+            return BiLSTMPreHead(input_dim=hidden_size, hidden_dim=128)
+        if pre_head_type == "transformer":
+            if hidden_size % transformer_nhead != 0:
+                raise ValueError(
+                    f"hidden_size={hidden_size} must be divisible by transformer nhead={transformer_nhead}."
+                )
+            return TransformerPreHead(model_dim=hidden_size, nhead=transformer_nhead)
+        raise ValueError(f"Unsupported pre_head_type: {pre_head_type}")
 
     def _get_transformer_layers(self) -> nn.ModuleList:
         candidates = (
@@ -214,22 +341,29 @@ class BasecallModel(nn.Module):
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        outputs = self.backbone(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            output_hidden_states=True,
-            return_dict=True,
-        )
-
-        hidden_states = outputs.hidden_states  # tuple(len = n_layers + 1)
-
-        try:
-            hidden = hidden_states[self.hidden_layer]
-        except IndexError:
-            raise ValueError(
-                f"hidden_layer={self.hidden_layer} out of range "
-                f"(num hidden states = {len(hidden_states)})"
+        if self.feature_source == "embedding":
+            embedding_layer = self.backbone.get_input_embeddings()
+            if embedding_layer is None:
+                raise ValueError("Backbone does not expose input embeddings via get_input_embeddings().")
+            hidden = embedding_layer(input_ids)
+        else:
+            outputs = self.backbone(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                output_hidden_states=True,
+                return_dict=True,
             )
 
+            hidden_states = outputs.hidden_states  # tuple(len = n_layers + 1)
+
+            try:
+                hidden = hidden_states[self.hidden_layer]
+            except IndexError:
+                raise ValueError(
+                    f"hidden_layer={self.hidden_layer} out of range "
+                    f"(num hidden states = {len(hidden_states)})"
+                )
+
+        hidden = self.pre_head(hidden)
         logits_btc = self.base_head(hidden)
         return logits_btc
