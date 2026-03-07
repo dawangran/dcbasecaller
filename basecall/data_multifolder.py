@@ -192,6 +192,34 @@ def _split_groups(groups: List[str], train_ratio: float, val_ratio: float, seed:
     return g_train, g_val, g_test
 
 
+def split_indices(
+    total_size: int,
+    train_ratio: float = 0.8,
+    val_ratio: float = 0.1,
+    test_ratio: float = 0.1,
+    seed: int = 42,
+) -> Tuple[List[int], List[int], List[int]]:
+    """Randomly split sample indices into train/val/test."""
+    if abs((train_ratio + val_ratio + test_ratio) - 1.0) > 1e-6:
+        raise ValueError("train_ratio + val_ratio + test_ratio must sum to 1.0")
+    if total_size <= 0:
+        return [], [], []
+
+    rng = np.random.default_rng(seed)
+    indices = np.arange(total_size)
+    rng.shuffle(indices)
+
+    n_train = int(round(total_size * train_ratio))
+    n_val = int(round(total_size * val_ratio))
+    n_train = min(max(n_train, 1), total_size)
+    n_val = min(max(n_val, 0), total_size - n_train)
+
+    train_idx = indices[:n_train].tolist()
+    val_idx = indices[n_train:n_train + n_val].tolist()
+    test_idx = indices[n_train + n_val:].tolist()
+    return train_idx, val_idx, test_idx
+
+
 def split_jsonl_files_by_group(
     jsonl_files: List[JsonlFile],
     train_ratio: float = 0.8,
