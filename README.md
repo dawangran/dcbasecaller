@@ -187,6 +187,8 @@ basecall-train \
 - `--wandb_group`: group related runs (e.g. same experiment family with different conditions).
 - `--wandb_job_type`: run type shown in W&B (default `train`).
 - `--find_unused_parameters`: enable DDP unused parameter detection.
+- `--ddp_backend`: choose `auto`, `nccl`, or `gloo` for distributed backend.
+- `--ddp_backend_fallback`: allow automatic fallback from NCCL to GLOO when NCCL init fails (e.g., socket interface issue).
 
 Example for grouped condition sweeps:
 

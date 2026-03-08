@@ -67,7 +67,7 @@ except Exception:
 
 # -------------------- distributed helpers --------------------
 
-def init_distributed() -> Tuple[int, int, int, torch.device, bool]:
+def init_distributed(preferred_backend: str = "auto", allow_backend_fallback: bool = True) -> Tuple[int, int, int, torch.device, bool, str]:
     ddp_env = ("RANK" in os.environ and "WORLD_SIZE" in os.environ)
 
     if ddp_env:
@@ -80,18 +80,29 @@ def init_distributed() -> Tuple[int, int, int, torch.device, bool]:
     if torch.cuda.is_available():
         torch.cuda.set_device(local_rank)
         device = torch.device("cuda", local_rank)
-        backend = "nccl"
     else:
         device = torch.device("cpu")
-        backend = "gloo"
+
+    if preferred_backend == "auto":
+        backend = "nccl" if device.type == "cuda" else "gloo"
+    else:
+        backend = preferred_backend
 
     if ddp_env and world_size > 1 and not dist.is_initialized():
-        dist.init_process_group(backend=backend, rank=rank, world_size=world_size)
+        try:
+            dist.init_process_group(backend=backend, rank=rank, world_size=world_size)
+        except Exception as e:
+            if backend == "nccl" and allow_backend_fallback:
+                print(f"[DDP] init_process_group with backend=nccl failed: {e}. Falling back to gloo.")
+                dist.init_process_group(backend="gloo", rank=rank, world_size=world_size)
+                backend = "gloo"
+            else:
+                raise
         ddp_enabled = True
     else:
         ddp_enabled = False
 
-    return rank, world_size, local_rank, device, ddp_enabled
+    return rank, world_size, local_rank, device, ddp_enabled, backend
 
 
 def cleanup_distributed(ddp_enabled: bool):
@@ -615,6 +626,10 @@ def parse_args():
 
     p.add_argument("--find_unused_parameters", action="store_true",
                    help="Enable DDP unused parameter detection (fix reduction error).")
+    p.add_argument("--ddp_backend", type=str, default="auto", choices=["auto", "nccl", "gloo"],
+                   help="Distributed backend selection. auto prefers NCCL on CUDA and GLOO on CPU.")
+    p.add_argument("--ddp_backend_fallback", action="store_true",
+                   help="Allow fallback from NCCL to GLOO if NCCL init fails (e.g., no socket interface).")
     p.add_argument("--amp", action="store_true",
                    help="Enable mixed precision (AMP) training on CUDA.")
 
@@ -684,14 +699,17 @@ def apply_quick_overrides(args) -> None:
 def main():
     args = parse_args()
     apply_quick_overrides(args)
-    rank, world_size, local_rank, device, ddp_enabled = init_distributed()
+    rank, world_size, local_rank, device, ddp_enabled, ddp_backend = init_distributed(
+        preferred_backend=args.ddp_backend,
+        allow_backend_fallback=bool(args.ddp_backend_fallback or args.ddp_backend == "auto"),
+    )
 
     seed_everything(args.seed + rank)
 
     os.makedirs(args.output_dir, exist_ok=True)
     logger = setup_logger(os.path.join(args.output_dir, "train.log"), rank)
     if is_main_process(rank):
-        logger.info(f"[DDP] world_size={world_size}, rank={rank}, local_rank={local_rank}, device={device}")
+        logger.info(f"[DDP] world_size={world_size}, rank={rank}, local_rank={local_rank}, device={device}, backend={ddp_backend}")
         logger.info(f"[Args] {vars(args)}")
         logger.info(f"[PreHead] type={args.pre_head_type} transformer_nhead={args.pre_head_transformer_nhead}")
         logger.info(f"[FeatureSource] source={args.feature_source} hidden_layer={args.hidden_layer}")
