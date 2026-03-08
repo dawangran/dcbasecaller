@@ -114,6 +114,25 @@ def _normalize_base_seq(seq: Any) -> str:
         return _ids_to_bases(ids, drop_blank=True)
     return str(seq)
 
+
+
+def _safe_parasail_alignment(pred_seq: str, ref_seq: str):
+    """Run parasail trace alignment safely; return None when traceback/cigar is unavailable."""
+    if len(ref_seq) == 0 or len(pred_seq) == 0:
+        return None
+    try:
+        alignment = parasail.sw_trace_striped_32(pred_seq, ref_seq, 8, 4, parasail.dnafull)
+    except Exception:
+        return None
+    try:
+        _ = alignment.cigar  # ensure traceback/cigar is available in this parasail result
+    except Exception:
+        return None
+    if not hasattr(alignment, "traceback") or alignment.traceback is None:
+        return None
+    return alignment
+
+
 def parasail_to_sam(result, seq):
     """
     Extract reference start and sam compatible cigar string.
@@ -125,6 +144,8 @@ def parasail_to_sam(result, seq):
     """
     cigstr = result.cigar.decode.decode()
     first = re.search(_SPLIT_CIGAR, cigstr)
+    if first is None:
+        raise ValueError(f"Invalid or empty CIGAR from parasail result: {cigstr!r}")
 
     first_count, first_op = first.groups()
     prefix = first.group()
@@ -155,10 +176,19 @@ def cal_bonito_accuracy(pred_seq, ref_seq, balanced=False, min_coverage=0.0):
     ref_seq = _normalize_base_seq(ref_seq)
     if len(ref_seq) == 0:
         return 0.0
-    alignment = parasail.sw_trace_striped_32(pred_seq, ref_seq, 8, 4, parasail.dnafull)
+    if len(pred_seq) == 0:
+        return 0.0
+
+    alignment = _safe_parasail_alignment(pred_seq, ref_seq)
+    if alignment is None:
+        return 0.0
+
     counts = defaultdict(int)
 
-    _, cigar = parasail_to_sam(alignment, pred_seq)
+    try:
+        _, cigar = parasail_to_sam(alignment, pred_seq)
+    except Exception:
+        return 0.0
 
     for count, op in re.findall(_SPLIT_CIGAR, cigar):
         counts[op] += int(count)
@@ -183,8 +213,17 @@ def parasail_error_counts(pred_seq: str, ref_seq: str) -> Dict[str, int]:
     counts = defaultdict(int)
     if len(ref_seq) == 0:
         return {"match": 0, "mismatch": 0, "ins": 0, "del": 0}
-    alignment = parasail.sw_trace_striped_32(pred_seq, ref_seq, 8, 4, parasail.dnafull)
-    _, cigar = parasail_to_sam(alignment, pred_seq)
+    if len(pred_seq) == 0:
+        return {"match": 0, "mismatch": 0, "ins": 0, "del": len(ref_seq)}
+
+    alignment = _safe_parasail_alignment(pred_seq, ref_seq)
+    if alignment is None:
+        return {"match": 0, "mismatch": 0, "ins": 0, "del": len(ref_seq)}
+
+    try:
+        _, cigar = parasail_to_sam(alignment, pred_seq)
+    except Exception:
+        return {"match": 0, "mismatch": 0, "ins": 0, "del": len(ref_seq)}
     for count, op in re.findall(_SPLIT_CIGAR, cigar):
         counts[op] += int(count)
     return {
@@ -204,8 +243,17 @@ def parasail_match_vector(pred_seq: str, ref_seq: str) -> List[int]:
     ref_seq = _normalize_base_seq(ref_seq)
     if len(ref_seq) == 0:
         return []
-    alignment = parasail.sw_trace_striped_32(pred_seq, ref_seq, 8, 4, parasail.dnafull)
-    _, cigar = parasail_to_sam(alignment, pred_seq)
+    if len(pred_seq) == 0:
+        return [0] * len(ref_seq)
+
+    alignment = _safe_parasail_alignment(pred_seq, ref_seq)
+    if alignment is None:
+        return [0] * len(ref_seq)
+
+    try:
+        _, cigar = parasail_to_sam(alignment, pred_seq)
+    except Exception:
+        return [0] * len(ref_seq)
     match: List[int] = []
     for count, op in re.findall(_SPLIT_CIGAR, cigar):
         span = int(count)

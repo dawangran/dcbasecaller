@@ -31,7 +31,7 @@ import torch
 from torch.amp import autocast, GradScaler
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 from torch.utils.data.distributed import DistributedSampler
 from tqdm.auto import tqdm
 
@@ -53,6 +53,7 @@ from .data_multifolder import (
     MultiJsonlSignalRefDataset,
     scan_npy_pairs,
     split_npy_pairs_by_group,
+    split_indices,
     MultiNpySignalRefDataset,
     create_collate_fn,
 )
@@ -66,7 +67,7 @@ except Exception:
 
 # -------------------- distributed helpers --------------------
 
-def init_distributed() -> Tuple[int, int, int, torch.device, bool]:
+def init_distributed(preferred_backend: str = "auto", allow_backend_fallback: bool = True) -> Tuple[int, int, int, torch.device, bool, str]:
     ddp_env = ("RANK" in os.environ and "WORLD_SIZE" in os.environ)
 
     if ddp_env:
@@ -79,18 +80,29 @@ def init_distributed() -> Tuple[int, int, int, torch.device, bool]:
     if torch.cuda.is_available():
         torch.cuda.set_device(local_rank)
         device = torch.device("cuda", local_rank)
-        backend = "nccl"
     else:
         device = torch.device("cpu")
-        backend = "gloo"
+
+    if preferred_backend == "auto":
+        backend = "nccl" if device.type == "cuda" else "gloo"
+    else:
+        backend = preferred_backend
 
     if ddp_env and world_size > 1 and not dist.is_initialized():
-        dist.init_process_group(backend=backend, rank=rank, world_size=world_size)
+        try:
+            dist.init_process_group(backend=backend, rank=rank, world_size=world_size)
+        except Exception as e:
+            if backend == "nccl" and allow_backend_fallback:
+                print(f"[DDP] init_process_group with backend=nccl failed: {e}. Falling back to gloo.")
+                dist.init_process_group(backend="gloo", rank=rank, world_size=world_size)
+                backend = "gloo"
+            else:
+                raise
         ddp_enabled = True
     else:
         ddp_enabled = False
 
-    return rank, world_size, local_rank, device, ddp_enabled
+    return rank, world_size, local_rank, device, ddp_enabled, backend
 
 
 def cleanup_distributed(ddp_enabled: bool):
@@ -561,7 +573,8 @@ def parse_args():
                    help="Comma-separated folders or tokens_*.npy/reference_*.npy files for validation set.")
     p.add_argument("--test_npy_paths", type=str, default=None,
                    help="Comma-separated folders or tokens_*.npy/reference_*.npy files for test set.")
-    p.add_argument("--group_by", type=str, default="folder", choices=["folder", "file"])
+    p.add_argument("--group_by", type=str, default="folder", choices=["folder", "file", "record"],
+                   help="Auto split granularity: folder/file keeps groups together; record shuffles all reads across files before split.")
     p.add_argument("--recursive", action="store_true",
                    help="Scan subfolders for .jsonl.gz or tokens/reference .npy inputs.")
 
@@ -613,6 +626,10 @@ def parse_args():
 
     p.add_argument("--find_unused_parameters", action="store_true",
                    help="Enable DDP unused parameter detection (fix reduction error).")
+    p.add_argument("--ddp_backend", type=str, default="auto", choices=["auto", "nccl", "gloo"],
+                   help="Distributed backend selection. auto prefers NCCL on CUDA and GLOO on CPU.")
+    p.add_argument("--ddp_backend_fallback", action="store_true",
+                   help="Allow fallback from NCCL to GLOO if NCCL init fails (e.g., no socket interface).")
     p.add_argument("--amp", action="store_true",
                    help="Enable mixed precision (AMP) training on CUDA.")
 
@@ -682,14 +699,17 @@ def apply_quick_overrides(args) -> None:
 def main():
     args = parse_args()
     apply_quick_overrides(args)
-    rank, world_size, local_rank, device, ddp_enabled = init_distributed()
+    rank, world_size, local_rank, device, ddp_enabled, ddp_backend = init_distributed(
+        preferred_backend=args.ddp_backend,
+        allow_backend_fallback=bool(args.ddp_backend_fallback or args.ddp_backend == "auto"),
+    )
 
     seed_everything(args.seed + rank)
 
     os.makedirs(args.output_dir, exist_ok=True)
     logger = setup_logger(os.path.join(args.output_dir, "train.log"), rank)
     if is_main_process(rank):
-        logger.info(f"[DDP] world_size={world_size}, rank={rank}, local_rank={local_rank}, device={device}")
+        logger.info(f"[DDP] world_size={world_size}, rank={rank}, local_rank={local_rank}, device={device}, backend={ddp_backend}")
         logger.info(f"[Args] {vars(args)}")
         logger.info(f"[PreHead] type={args.pre_head_type} transformer_nhead={args.pre_head_transformer_nhead}")
         logger.info(f"[FeatureSource] source={args.feature_source} hidden_layer={args.hidden_layer}")
@@ -761,52 +781,88 @@ def main():
 
     if using_npy:
         if train_npy_paths or val_npy_paths or test_npy_paths:
-            train_pairs = scan_npy_pairs(train_npy_paths, group_by=args.group_by, recursive=args.recursive)
-            val_pairs = scan_npy_pairs(val_npy_paths, group_by=args.group_by, recursive=args.recursive) if val_npy_paths else []
-            test_pairs = scan_npy_pairs(test_npy_paths, group_by=args.group_by, recursive=args.recursive) if test_npy_paths else []
+            train_pairs = scan_npy_pairs(train_npy_paths, group_by=args.group_by if args.group_by != "record" else "file", recursive=args.recursive)
+            val_pairs = scan_npy_pairs(val_npy_paths, group_by=args.group_by if args.group_by != "record" else "file", recursive=args.recursive) if val_npy_paths else []
+            test_pairs = scan_npy_pairs(test_npy_paths, group_by=args.group_by if args.group_by != "record" else "file", recursive=args.recursive) if test_npy_paths else []
+            train_dataset = MultiNpySignalRefDataset(train_pairs)
+            val_dataset = MultiNpySignalRefDataset(val_pairs) if len(val_pairs) else None
+            test_dataset = MultiNpySignalRefDataset(test_pairs) if len(test_pairs) else None
         else:
             if not args.npy_paths:
                 raise ValueError("Provide --npy_paths or explicit --train_npy_paths/--val_npy_paths/--test_npy_paths.")
             npy_paths = [x.strip() for x in args.npy_paths.split(",") if x.strip()]
-            npy_pairs = scan_npy_pairs(npy_paths, group_by=args.group_by, recursive=args.recursive)
-            train_pairs, val_pairs, test_pairs = split_npy_pairs_by_group(
-                npy_pairs,
-                train_ratio=args.train_ratio,
-                val_ratio=args.val_ratio,
-                test_ratio=args.test_ratio,
-                seed=args.split_seed,
-            )
+            npy_pairs = scan_npy_pairs(npy_paths, group_by=args.group_by if args.group_by != "record" else "file", recursive=args.recursive)
+            if args.group_by == "record":
+                all_dataset = MultiNpySignalRefDataset(npy_pairs)
+                train_idx, val_idx, test_idx = split_indices(
+                    len(all_dataset),
+                    train_ratio=args.train_ratio,
+                    val_ratio=args.val_ratio,
+                    test_ratio=args.test_ratio,
+                    seed=args.split_seed,
+                )
+                train_dataset = Subset(all_dataset, train_idx)
+                val_dataset = Subset(all_dataset, val_idx) if len(val_idx) else None
+                test_dataset = Subset(all_dataset, test_idx) if len(test_idx) else None
+            else:
+                train_pairs, val_pairs, test_pairs = split_npy_pairs_by_group(
+                    npy_pairs,
+                    train_ratio=args.train_ratio,
+                    val_ratio=args.val_ratio,
+                    test_ratio=args.test_ratio,
+                    seed=args.split_seed,
+                )
+                train_dataset = MultiNpySignalRefDataset(train_pairs)
+                val_dataset = MultiNpySignalRefDataset(val_pairs) if len(val_pairs) else None
+                test_dataset = MultiNpySignalRefDataset(test_pairs) if len(test_pairs) else None
 
         if is_main_process(rank):
-            logger.info(f"[Data] train_pairs={len(train_pairs)} val_pairs={len(val_pairs)} test_pairs={len(test_pairs)}")
-
-        train_dataset = MultiNpySignalRefDataset(train_pairs)
-        val_dataset = MultiNpySignalRefDataset(val_pairs) if len(val_pairs) else None
-        test_dataset = MultiNpySignalRefDataset(test_pairs) if len(test_pairs) else None
+            if args.group_by == "record":
+                logger.info(f"[Data] split by record: train={len(train_dataset)} val={len(val_dataset) if val_dataset is not None else 0} test={len(test_dataset) if test_dataset is not None else 0}")
+            else:
+                logger.info(f"[Data] train_pairs={len(train_pairs)} val_pairs={len(val_pairs)} test_pairs={len(test_pairs)}")
     else:
         if train_jsonl_paths or val_jsonl_paths or test_jsonl_paths:
-            train_files = scan_jsonl_files(train_jsonl_paths, group_by=args.group_by, recursive=args.recursive)
-            val_files = scan_jsonl_files(val_jsonl_paths, group_by=args.group_by, recursive=args.recursive) if val_jsonl_paths else []
-            test_files = scan_jsonl_files(test_jsonl_paths, group_by=args.group_by, recursive=args.recursive) if test_jsonl_paths else []
+            train_files = scan_jsonl_files(train_jsonl_paths, group_by=args.group_by if args.group_by != "record" else "file", recursive=args.recursive)
+            val_files = scan_jsonl_files(val_jsonl_paths, group_by=args.group_by if args.group_by != "record" else "file", recursive=args.recursive) if val_jsonl_paths else []
+            test_files = scan_jsonl_files(test_jsonl_paths, group_by=args.group_by if args.group_by != "record" else "file", recursive=args.recursive) if test_jsonl_paths else []
+            train_dataset = MultiJsonlSignalRefDataset(train_files)
+            val_dataset = MultiJsonlSignalRefDataset(val_files) if len(val_files) else None
+            test_dataset = MultiJsonlSignalRefDataset(test_files) if len(test_files) else None
         else:
             if not args.jsonl_paths:
                 raise ValueError("Provide --jsonl_paths or explicit --train_jsonl_paths/--val_jsonl_paths/--test_jsonl_paths.")
             jsonl_paths = [x.strip() for x in args.jsonl_paths.split(",") if x.strip()]
-            jsonl_files = scan_jsonl_files(jsonl_paths, group_by=args.group_by, recursive=args.recursive)
-            train_files, val_files, test_files = split_jsonl_files_by_group(
-                jsonl_files,
-                train_ratio=args.train_ratio,
-                val_ratio=args.val_ratio,
-                test_ratio=args.test_ratio,
-                seed=args.split_seed,
-            )
+            jsonl_files = scan_jsonl_files(jsonl_paths, group_by=args.group_by if args.group_by != "record" else "file", recursive=args.recursive)
+            if args.group_by == "record":
+                all_dataset = MultiJsonlSignalRefDataset(jsonl_files)
+                train_idx, val_idx, test_idx = split_indices(
+                    len(all_dataset),
+                    train_ratio=args.train_ratio,
+                    val_ratio=args.val_ratio,
+                    test_ratio=args.test_ratio,
+                    seed=args.split_seed,
+                )
+                train_dataset = Subset(all_dataset, train_idx)
+                val_dataset = Subset(all_dataset, val_idx) if len(val_idx) else None
+                test_dataset = Subset(all_dataset, test_idx) if len(test_idx) else None
+            else:
+                train_files, val_files, test_files = split_jsonl_files_by_group(
+                    jsonl_files,
+                    train_ratio=args.train_ratio,
+                    val_ratio=args.val_ratio,
+                    test_ratio=args.test_ratio,
+                    seed=args.split_seed,
+                )
+                train_dataset = MultiJsonlSignalRefDataset(train_files)
+                val_dataset = MultiJsonlSignalRefDataset(val_files) if len(val_files) else None
+                test_dataset = MultiJsonlSignalRefDataset(test_files) if len(test_files) else None
 
         if is_main_process(rank):
-            logger.info(f"[Data] train_files={len(train_files)} val_files={len(val_files)} test_files={len(test_files)}")
-
-        train_dataset = MultiJsonlSignalRefDataset(train_files)
-        val_dataset = MultiJsonlSignalRefDataset(val_files) if len(val_files) else None
-        test_dataset = MultiJsonlSignalRefDataset(test_files) if len(test_files) else None
+            if args.group_by == "record":
+                logger.info(f"[Data] split by record: train={len(train_dataset)} val={len(val_dataset) if val_dataset is not None else 0} test={len(test_dataset) if test_dataset is not None else 0}")
+            else:
+                logger.info(f"[Data] train_files={len(train_files)} val_files={len(val_files)} test_files={len(test_files)}")
 
     collate_fn = create_collate_fn(tokenizer)
 

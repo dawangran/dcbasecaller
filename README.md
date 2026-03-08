@@ -121,6 +121,21 @@ basecall-train \
   --output_dir outputs
 ```
 
+
+### Shuffle across multiple files (ignore file boundaries)
+
+If each source file has different distribution and you want global random mixing before split:
+
+```bash
+basecall-train \
+  --jsonl_paths /path/to/data1,/path/to/data2,/path/to/data3 \
+  --group_by record \
+  --train_ratio 0.8 --val_ratio 0.1 --test_ratio 0.1 \
+  --split_seed 42 \
+  --model_name_or_path <hf-model> \
+  --output_dir outputs
+```
+
 ### All training arguments
 
 **Data & split**
@@ -128,7 +143,7 @@ basecall-train \
 - `--train_jsonl_paths`, `--val_jsonl_paths`, `--test_jsonl_paths`: explicit JSONL split inputs (skip auto split).
 - `--npy_paths`: comma-separated folders or `tokens_*.npy`/`reference_*.npy` files (uses token/reference pairs).
 - `--train_npy_paths`, `--val_npy_paths`, `--test_npy_paths`: explicit npy split inputs (skip auto split).
-- `--group_by`: `folder` or `file` (controls leakage prevention when auto splitting).
+- `--group_by`: `folder`, `file`, or `record` (auto split granularity; use `record` to shuffle all reads across files and then split).
 - `--recursive`: scan subfolders for `.jsonl.gz` or tokens/reference `.npy`.
 - `--train_ratio`, `--val_ratio`, `--test_ratio`: ratios for auto split.
 - `--split_seed`: random seed for auto split.
@@ -172,6 +187,8 @@ basecall-train \
 - `--wandb_group`: group related runs (e.g. same experiment family with different conditions).
 - `--wandb_job_type`: run type shown in W&B (default `train`).
 - `--find_unused_parameters`: enable DDP unused parameter detection.
+- `--ddp_backend`: choose `auto`, `nccl`, or `gloo` for distributed backend.
+- `--ddp_backend_fallback`: allow automatic fallback from NCCL to GLOO when NCCL init fails (e.g., socket interface issue).
 
 Example for grouped condition sweeps:
 
