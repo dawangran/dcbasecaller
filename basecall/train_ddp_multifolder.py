@@ -123,6 +123,14 @@ def reduce_mean(t: torch.Tensor) -> torch.Tensor:
     return rt
 
 
+def reduce_min(t: torch.Tensor) -> torch.Tensor:
+    if not dist.is_available() or not dist.is_initialized():
+        return t
+    rt = t.clone()
+    dist.all_reduce(rt, op=dist.ReduceOp.MIN)
+    return rt
+
+
 def setup_logger(log_file: str, rank: int) -> logging.Logger:
     logger = logging.getLogger("basecaller_ddp_multifolder")
     logger.setLevel(logging.INFO)
@@ -333,7 +341,14 @@ def train_one_epoch(
                     blank_idx=BLANK_IDX,
                 )
                 loss = ctc_loss_dict["total_loss"]
-        if torch.isfinite(loss):
+        local_finite = torch.tensor(
+            1 if torch.isfinite(loss).item() else 0,
+            device=device,
+            dtype=torch.int,
+        )
+        global_finite = bool(reduce_min(local_finite).item())
+
+        if global_finite:
             if use_amp:
                 scaler.scale(loss).backward()
                 scaler.unscale_(optimizer)
@@ -348,6 +363,8 @@ def train_one_epoch(
                 optimizer.step()
             if scheduler is not None:
                 scheduler.step()
+        elif is_main_process(rank):
+            print(f"[Train] step={step}/{len(data_loader)} non-finite loss detected on >=1 rank; skipping optimizer step on all ranks.")
 
         total_loss += float(loss.item())
         n_batches += 1
@@ -630,6 +647,8 @@ def parse_args():
                    help="Distributed backend selection. auto prefers NCCL on CUDA and GLOO on CPU.")
     p.add_argument("--ddp_backend_fallback", action="store_true",
                    help="Allow fallback from NCCL to GLOO if NCCL init fails (e.g., no socket interface).")
+    p.add_argument("--ddp_broadcast_buffers", action="store_true",
+                   help="Enable DDP per-forward buffer broadcast. Keep off by default to reduce desync-related NCCL broadcast stalls.")
     p.add_argument("--amp", action="store_true",
                    help="Enable mixed precision (AMP) training on CUDA.")
 
@@ -756,7 +775,10 @@ def main():
             device_ids=[local_rank],
             output_device=local_rank,
             find_unused_parameters=bool(args.find_unused_parameters),
+            broadcast_buffers=bool(args.ddp_broadcast_buffers),
         )
+        if is_main_process(rank):
+            logger.info(f"[DDP] broadcast_buffers={bool(args.ddp_broadcast_buffers)}")
 
     if is_main_process(rank):
         raw_model = get_raw_model(model)
