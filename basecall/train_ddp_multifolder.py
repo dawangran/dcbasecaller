@@ -20,6 +20,7 @@ train_ddp_multifolder.py
 """
 
 import os
+import socket
 import math
 import argparse
 import matplotlib.pyplot as plt
