@@ -196,7 +196,9 @@ basecall-train \
 - `--wandb_group`: group related runs (e.g. same experiment family with different conditions).
 - `--wandb_job_type`: run type shown in W&B (default `train`).
 - Launch distributed runs with `accelerate launch ... basecall.train_ddp_multifolder`.
-- Legacy `--find_unused_parameters`, `--ddp_backend`, `--ddp_backend_fallback`, and `--ddp_broadcast_buffers` flags remain accepted for CLI compatibility but are ignored by the Accelerate-based launcher.
+- `--find_unused_parameters` and `--ddp_broadcast_buffers` are forwarded into Accelerate's DDP wrapper settings.
+- `--ddp_backend` selects the process-group backend (`auto`, `nccl`, `gloo`).
+- `--ddp_backend_fallback` allows automatic fallback from NCCL to GLOO when NCCL cannot initialize cleanly (for example, no visible socket interface under `torchrun`).
 
 Example for grouped condition sweeps:
 

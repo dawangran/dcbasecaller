@@ -25,11 +25,13 @@ import argparse
 import matplotlib.pyplot as plt
 import logging
 from contextlib import nullcontext
+from datetime import timedelta
 from typing import Tuple, Optional, Any, Dict, List
 import numpy as np
 
 import torch
 from accelerate import Accelerator
+from accelerate.utils import DistributedDataParallelKwargs, InitProcessGroupKwargs
 from torch.utils.data import DataLoader, Subset
 from tqdm.auto import tqdm
 
@@ -64,6 +66,58 @@ except Exception:
 
 
 # -------------------- distributed helpers --------------------
+
+def nccl_socket_preflight() -> Tuple[bool, Optional[str], Optional[str]]:
+    if os.environ.get("NCCL_SOCKET_IFNAME"):
+        iface_names = {name for _, name in socket.if_nameindex()}
+        raw_expr = os.environ["NCCL_SOCKET_IFNAME"]
+        requested = [x.strip() for x in raw_expr.split(",") if x.strip()]
+        normalized_iface_expr = ",".join(requested) if requested else None
+
+        advanced_rules = [rule for rule in requested if rule.startswith("=") or rule.startswith("^")]
+        if advanced_rules:
+            return False, (
+                f"NCCL_SOCKET_IFNAME={raw_expr!r} uses advanced NCCL filter syntax {advanced_rules!r}; "
+                "falling back to gloo because this environment cannot validate or normalize it safely. "
+                f"Use a plain visible interface name such as 'eth0' instead (visible={sorted(iface_names)})."
+            ), None
+
+        matched = [name for name in requested if name in iface_names]
+        if matched:
+            return True, None, ",".join(matched)
+        return False, (
+            f"NCCL_SOCKET_IFNAME={raw_expr!r} does not match any visible network interface "
+            f"(visible={sorted(iface_names)})"
+        ), normalized_iface_expr
+
+    iface_names = [name for _, name in socket.if_nameindex()]
+    non_loopback = [name for name in iface_names if name != "lo" and not name.startswith("lo:")]
+    if non_loopback:
+        return True, None, non_loopback[0]
+    return False, f"no non-loopback network interface is visible (found: {iface_names or ['<none>']})", None
+
+
+def resolve_distributed_backend(args) -> Tuple[str, Optional[str]]:
+    ddp_env = ("RANK" in os.environ and "WORLD_SIZE" in os.environ and int(os.environ.get("WORLD_SIZE", "1")) > 1)
+    backend = args.ddp_backend
+    if backend == "auto":
+        backend = "nccl" if torch.cuda.is_available() else "gloo"
+
+    fallback_allowed = bool(args.ddp_backend_fallback or args.ddp_backend == "auto")
+    info_message: Optional[str] = None
+    if ddp_env and backend == "nccl" and fallback_allowed:
+        nccl_ok, nccl_reason, normalized_iface_expr = nccl_socket_preflight()
+        if not nccl_ok:
+            info_message = f"[Accelerate] NCCL preflight failed: {nccl_reason}. Falling back to gloo before Accelerator initialization."
+            backend = "gloo"
+        elif normalized_iface_expr and normalized_iface_expr != os.environ.get("NCCL_SOCKET_IFNAME"):
+            original_iface_expr = os.environ.get("NCCL_SOCKET_IFNAME")
+            os.environ["NCCL_SOCKET_IFNAME"] = normalized_iface_expr
+            info_message = (
+                "[Accelerate] Normalizing NCCL_SOCKET_IFNAME from "
+                f"{original_iface_expr!r} to {normalized_iface_expr!r} for NCCL compatibility."
+            )
+    return backend, info_message
 
 def is_main_process(accelerator: Accelerator) -> bool:
     return accelerator.is_main_process
@@ -660,7 +714,17 @@ def apply_quick_overrides(args) -> None:
 def main():
     args = parse_args()
     apply_quick_overrides(args)
+    backend, backend_note = resolve_distributed_backend(args)
+    ddp_kwargs = DistributedDataParallelKwargs(
+        find_unused_parameters=bool(args.find_unused_parameters),
+        broadcast_buffers=bool(args.ddp_broadcast_buffers),
+    )
+    init_pg_kwargs = InitProcessGroupKwargs(
+        backend=backend,
+        timeout=timedelta(minutes=30),
+    )
     accelerator = Accelerator(
+        kwargs_handlers=[ddp_kwargs, init_pg_kwargs],
         mixed_precision="fp16" if args.amp and torch.cuda.is_available() else "no",
         log_with="wandb" if args.use_wandb and wandb is not None else None,
     )
@@ -675,10 +739,13 @@ def main():
     logger = setup_logger(os.path.join(args.output_dir, "train.log"), accelerator)
     distributed_type = str(accelerator.distributed_type).split(".")[-1].lower()
     if is_main_process(accelerator):
-        logger.info(f"[Accelerate] world_size={world_size}, rank={rank}, local_rank={local_rank}, device={device}, distributed_type={distributed_type}")
+        logger.info(
+            f"[Accelerate] world_size={world_size}, rank={rank}, local_rank={local_rank}, "
+            f"device={device}, distributed_type={distributed_type}, backend={backend}"
+        )
         logger.info(f"[Args] {vars(args)}")
-        if args.find_unused_parameters or args.ddp_backend != "auto" or args.ddp_backend_fallback or args.ddp_broadcast_buffers:
-            logger.warning("[Accelerate] Legacy DDP flags were provided but are ignored; use your Accelerate config/launch settings instead.")
+        if backend_note:
+            logger.warning(backend_note)
         logger.info(f"[PreHead] type={args.pre_head_type} transformer_nhead={args.pre_head_transformer_nhead}")
         logger.info(f"[FeatureSource] source={args.feature_source} hidden_layer={args.hidden_layer}")
         if args.quick:
