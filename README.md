@@ -17,6 +17,15 @@ The core workflow is:
 pip install -e .
 ```
 
+Distributed or mixed-precision training is managed via Hugging Face Accelerate. Launch multi-process jobs with `accelerate launch` instead of manually wiring DDP/NCCL settings:
+
+```bash
+accelerate launch --num_processes 4 -m basecall.train_ddp_multifolder \
+  --jsonl_paths /path/to/data \
+  --model_name_or_path <hf-model> \
+  --output_dir outputs
+```
+
 For decoding/training with CTC-CRF and Bonito-style metrics, also ensure these runtime dependencies are available:
 
 ```bash
@@ -182,13 +191,14 @@ basecall-train \
 - `--pretrained_strict`, `--pretrained_key`.
 - `--save_every`, `--save_best`.
 
-**DDP/Logging**
+**Distributed/Logging**
 - `--use_wandb`, `--wandb_project`, `--wandb_entity`, `--wandb_run_name`.
 - `--wandb_group`: group related runs (e.g. same experiment family with different conditions).
 - `--wandb_job_type`: run type shown in W&B (default `train`).
-- `--find_unused_parameters`: enable DDP unused parameter detection.
-- `--ddp_backend`: choose `auto`, `nccl`, or `gloo` for distributed backend.
-- `--ddp_backend_fallback`: allow automatic fallback from NCCL to GLOO when NCCL init fails (e.g., socket interface issue).
+- Launch distributed runs with `accelerate launch ... basecall.train_ddp_multifolder`.
+- `--find_unused_parameters` and `--ddp_broadcast_buffers` are forwarded into Accelerate's DDP wrapper settings.
+- `--ddp_backend` selects the process-group backend (`auto`, `nccl`, `gloo`).
+- `--ddp_backend_fallback` allows automatic fallback from NCCL to GLOO when NCCL cannot initialize cleanly (for example, no visible socket interface under `torchrun`).
 
 Example for grouped condition sweeps:
 
