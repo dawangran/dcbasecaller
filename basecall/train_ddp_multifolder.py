@@ -71,11 +71,24 @@ except Exception:
 def nccl_socket_preflight() -> Tuple[bool, Optional[str]]:
     if os.environ.get("NCCL_SOCKET_IFNAME"):
         iface_names = {name for _, name in socket.if_nameindex()}
-        requested = [x.strip() for x in os.environ["NCCL_SOCKET_IFNAME"].split(",") if x.strip()]
+        raw_expr = os.environ["NCCL_SOCKET_IFNAME"]
+        requested = [x.strip() for x in raw_expr.split(",") if x.strip()]
+
+        advanced_rules = [rule for rule in requested if rule.startswith("=") or rule.startswith("^")]
+        if advanced_rules:
+            return False, (
+                f"NCCL_SOCKET_IFNAME={raw_expr!r} uses advanced NCCL filter syntax {advanced_rules!r}; "
+                "falling back to gloo because this environment cannot validate or normalize it safely. "
+                f"Use a plain visible interface name such as 'eth0' instead (visible={sorted(iface_names)})."
+            )
+
         matched = [name for name in requested if name in iface_names]
         if matched:
             return True, None
-        return False, f"NCCL_SOCKET_IFNAME={os.environ['NCCL_SOCKET_IFNAME']!r} does not match any visible network interface"
+        return False, (
+            f"NCCL_SOCKET_IFNAME={raw_expr!r} does not match any visible network interface "
+            f"(visible={sorted(iface_names)})"
+        )
 
     iface_names = [name for _, name in socket.if_nameindex()]
     non_loopback = [name for name in iface_names if name != "lo" and not name.startswith("lo:")]
