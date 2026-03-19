@@ -68,41 +68,6 @@ except Exception:
 
 # -------------------- distributed helpers --------------------
 
-def _split_nccl_socket_ifname(raw_expr: str) -> Tuple[List[str], List[str]]:
-    include_rules: List[str] = []
-    exclude_rules: List[str] = []
-    for rule in [x.strip() for x in raw_expr.split(",") if x.strip()]:
-        if rule.startswith("^"):
-            exclude_rules.append(rule[1:])
-        else:
-            include_rules.append(rule)
-    return include_rules, exclude_rules
-
-
-def _rule_matches_iface(rule: str, iface_name: str) -> bool:
-    if not rule:
-        return False
-    if rule.startswith("="):
-        return iface_name == rule[1:]
-    return iface_name.startswith(rule)
-
-
-def _normalize_nccl_socket_ifname(raw_expr: str, matched: List[str], include_rules: List[str], exclude_rules: List[str]) -> Optional[str]:
-    # 某些环境里 NCCL 对 `=eth0` 这类精确匹配写法兼容性不好，
-    # 这里仅在“纯精确匹配、无排除规则”场景下改写成普通接口名，尽量保留原语义。
-    if exclude_rules:
-        return None
-    if not include_rules or any(not rule.startswith("=") for rule in include_rules):
-        return None
-
-    normalized: List[str] = []
-    for rule in include_rules:
-        exact_name = rule[1:]
-        if exact_name in matched and exact_name not in normalized:
-            normalized.append(exact_name)
-    return ",".join(normalized) if normalized else None
-
-
 def nccl_socket_preflight() -> Tuple[bool, Optional[str], Optional[str]]:
     if os.environ.get("NCCL_SOCKET_IFNAME"):
         iface_names = {name for _, name in socket.if_nameindex()}
@@ -115,15 +80,15 @@ def nccl_socket_preflight() -> Tuple[bool, Optional[str], Optional[str]]:
                 f"NCCL_SOCKET_IFNAME={raw_expr!r} uses advanced NCCL filter syntax {advanced_rules!r}; "
                 "falling back to gloo because this environment cannot validate or normalize it safely. "
                 f"Use a plain visible interface name such as 'eth0' instead (visible={sorted(iface_names)})."
-            )
+            ), None
 
         matched = [name for name in requested if name in iface_names]
         if matched:
-            return True, None
+            return True, None, None
         return False, (
             f"NCCL_SOCKET_IFNAME={raw_expr!r} does not match any visible network interface "
             f"(visible={sorted(iface_names)})"
-        )
+        ), None
 
     iface_names = [name for _, name in socket.if_nameindex()]
     non_loopback = [name for name in iface_names if name != "lo" and not name.startswith("lo:")]
@@ -154,7 +119,7 @@ def init_distributed(preferred_backend: str = "auto", allow_backend_fallback: bo
         backend = preferred_backend
 
     if ddp_env and world_size > 1 and backend == "nccl" and allow_backend_fallback:
-        nccl_ok, nccl_reason, normalized_iface_expr = nccl_socket_preflight()
+        nccl_ok, nccl_reason, _ = nccl_socket_preflight()
         if not nccl_ok:
             print(f"[DDP] NCCL preflight failed: {nccl_reason}. Falling back to gloo before init_process_group.")
             backend = "gloo"
