@@ -68,20 +68,45 @@ except Exception:
 
 # -------------------- distributed helpers --------------------
 
-def nccl_socket_preflight() -> Tuple[bool, Optional[str]]:
+def nccl_socket_preflight() -> Tuple[bool, Optional[str], Optional[str]]:
     if os.environ.get("NCCL_SOCKET_IFNAME"):
         iface_names = {name for _, name in socket.if_nameindex()}
-        requested = [x.strip() for x in os.environ["NCCL_SOCKET_IFNAME"].split(",") if x.strip()]
+        raw_expr = os.environ["NCCL_SOCKET_IFNAME"]
+        requested = [x.strip() for x in raw_expr.split(",") if x.strip()]
+
+        advanced_rules = [rule for rule in requested if rule.startswith("=") or rule.startswith("^")]
+        if advanced_rules:
+            return False, (
+                f"NCCL_SOCKET_IFNAME={raw_expr!r} uses advanced NCCL filter syntax {advanced_rules!r}; "
+                "falling back to gloo because this environment cannot validate or normalize it safely. "
+                f"Use a plain visible interface name such as 'eth0' instead (visible={sorted(iface_names)})."
+            ), None
+
         matched = [name for name in requested if name in iface_names]
         if matched:
-            return True, None
-        return False, f"NCCL_SOCKET_IFNAME={os.environ['NCCL_SOCKET_IFNAME']!r} does not match any visible network interface"
+            return True, None, None
+        return False, (
+            f"NCCL_SOCKET_IFNAME={raw_expr!r} does not match any visible network interface "
+            f"(visible={sorted(iface_names)})"
+        ), None
 
     iface_names = [name for _, name in socket.if_nameindex()]
     non_loopback = [name for name in iface_names if name != "lo" and not name.startswith("lo:")]
     if non_loopback:
-        return True, None
-    return False, f"no non-loopback network interface is visible (found: {iface_names or ['<none>']})"
+        return True, None, None
+    return False, f"no non-loopback network interface is visible (found: {iface_names or ['<none>']})", None
+
+
+def _unpack_nccl_preflight_result(result: Any) -> Tuple[bool, Optional[str], Optional[str]]:
+    if not isinstance(result, tuple):
+        raise TypeError(f"nccl_socket_preflight() must return a tuple, got {type(result).__name__}")
+    if len(result) == 2:
+        nccl_ok, nccl_reason = result
+        return nccl_ok, nccl_reason, None
+    if len(result) == 3:
+        nccl_ok, nccl_reason, normalized_iface_expr = result
+        return nccl_ok, nccl_reason, normalized_iface_expr
+    raise ValueError(f"nccl_socket_preflight() returned unexpected tuple length: {len(result)}")
 
 
 def init_distributed(preferred_backend: str = "auto", allow_backend_fallback: bool = True) -> Tuple[int, int, int, torch.device, bool, str]:
@@ -106,10 +131,13 @@ def init_distributed(preferred_backend: str = "auto", allow_backend_fallback: bo
         backend = preferred_backend
 
     if ddp_env and world_size > 1 and backend == "nccl" and allow_backend_fallback:
-        nccl_ok, nccl_reason = nccl_socket_preflight()
+        nccl_ok, nccl_reason, normalized_iface_expr = _unpack_nccl_preflight_result(nccl_socket_preflight())
         if not nccl_ok:
-            print(f"[DDP] NCCL preflight failed: {nccl_reason}. Falling back to gloo before init_process_group.")
+            separator = "" if (nccl_reason or "").endswith(".") else "."
+            print(f"[DDP] NCCL preflight failed: {nccl_reason}{separator} Falling back to gloo before init_process_group.")
             backend = "gloo"
+        elif normalized_iface_expr and normalized_iface_expr != os.environ.get("NCCL_SOCKET_IFNAME"):
+            os.environ["NCCL_SOCKET_IFNAME"] = normalized_iface_expr
 
     if ddp_env and world_size > 1 and not dist.is_initialized():
         try:
