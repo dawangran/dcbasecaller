@@ -71,11 +71,45 @@ except Exception:
 def nccl_socket_preflight() -> Tuple[bool, Optional[str]]:
     if os.environ.get("NCCL_SOCKET_IFNAME"):
         iface_names = {name for _, name in socket.if_nameindex()}
-        requested = [x.strip() for x in os.environ["NCCL_SOCKET_IFNAME"].split(",") if x.strip()]
-        matched = [name for name in requested if name in iface_names]
+        raw_expr = os.environ["NCCL_SOCKET_IFNAME"]
+        requested = [x.strip() for x in raw_expr.split(",") if x.strip()]
+
+        include_rules: List[str] = []
+        exclude_rules: List[str] = []
+        for rule in requested:
+            if rule.startswith("^"):
+                exclude_rules.append(rule[1:])
+            else:
+                include_rules.append(rule)
+
+        def _rule_matches_iface(rule: str, iface_name: str) -> bool:
+            if not rule:
+                return False
+            if rule.startswith("="):
+                return iface_name == rule[1:]
+            return iface_name.startswith(rule)
+
+        visible_after_exclude = {
+            iface_name
+            for iface_name in iface_names
+            if not any(_rule_matches_iface(rule, iface_name) for rule in exclude_rules)
+        }
+
+        if include_rules:
+            matched = [
+                iface_name
+                for iface_name in visible_after_exclude
+                if any(_rule_matches_iface(rule, iface_name) for rule in include_rules)
+            ]
+        else:
+            matched = list(visible_after_exclude)
+
         if matched:
             return True, None
-        return False, f"NCCL_SOCKET_IFNAME={os.environ['NCCL_SOCKET_IFNAME']!r} does not match any visible network interface"
+        return False, (
+            f"NCCL_SOCKET_IFNAME={raw_expr!r} does not match any visible network interface "
+            f"(visible={sorted(iface_names)})"
+        )
 
     iface_names = [name for _, name in socket.if_nameindex()]
     non_loopback = [name for name in iface_names if name != "lo" and not name.startswith("lo:")]
