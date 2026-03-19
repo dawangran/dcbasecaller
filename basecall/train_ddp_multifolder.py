@@ -21,6 +21,7 @@ train_ddp_multifolder.py
 
 import os
 import math
+import socket
 import argparse
 import matplotlib.pyplot as plt
 import logging
@@ -67,6 +68,22 @@ except Exception:
 
 # -------------------- distributed helpers --------------------
 
+def nccl_socket_preflight() -> Tuple[bool, Optional[str]]:
+    if os.environ.get("NCCL_SOCKET_IFNAME"):
+        iface_names = {name for _, name in socket.if_nameindex()}
+        requested = [x.strip() for x in os.environ["NCCL_SOCKET_IFNAME"].split(",") if x.strip()]
+        matched = [name for name in requested if name in iface_names]
+        if matched:
+            return True, None
+        return False, f"NCCL_SOCKET_IFNAME={os.environ['NCCL_SOCKET_IFNAME']!r} does not match any visible network interface"
+
+    iface_names = [name for _, name in socket.if_nameindex()]
+    non_loopback = [name for name in iface_names if name != "lo" and not name.startswith("lo:")]
+    if non_loopback:
+        return True, None
+    return False, f"no non-loopback network interface is visible (found: {iface_names or ['<none>']})"
+
+
 def init_distributed(preferred_backend: str = "auto", allow_backend_fallback: bool = True) -> Tuple[int, int, int, torch.device, bool, str]:
     ddp_env = ("RANK" in os.environ and "WORLD_SIZE" in os.environ)
 
@@ -87,6 +104,12 @@ def init_distributed(preferred_backend: str = "auto", allow_backend_fallback: bo
         backend = "nccl" if device.type == "cuda" else "gloo"
     else:
         backend = preferred_backend
+
+    if ddp_env and world_size > 1 and backend == "nccl" and allow_backend_fallback:
+        nccl_ok, nccl_reason = nccl_socket_preflight()
+        if not nccl_ok:
+            print(f"[DDP] NCCL preflight failed: {nccl_reason}. Falling back to gloo before init_process_group.")
+            backend = "gloo"
 
     if ddp_env and world_size > 1 and not dist.is_initialized():
         try:
