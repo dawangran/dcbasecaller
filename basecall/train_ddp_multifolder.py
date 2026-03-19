@@ -21,6 +21,7 @@ train_ddp_multifolder.py
 
 import os
 import math
+import socket
 import argparse
 import matplotlib.pyplot as plt
 import logging
@@ -67,6 +68,22 @@ except Exception:
 
 # -------------------- distributed helpers --------------------
 
+def nccl_socket_preflight() -> Tuple[bool, Optional[str]]:
+    if os.environ.get("NCCL_SOCKET_IFNAME"):
+        iface_names = {name for _, name in socket.if_nameindex()}
+        requested = [x.strip() for x in os.environ["NCCL_SOCKET_IFNAME"].split(",") if x.strip()]
+        matched = [name for name in requested if name in iface_names]
+        if matched:
+            return True, None
+        return False, f"NCCL_SOCKET_IFNAME={os.environ['NCCL_SOCKET_IFNAME']!r} does not match any visible network interface"
+
+    iface_names = [name for _, name in socket.if_nameindex()]
+    non_loopback = [name for name in iface_names if name != "lo" and not name.startswith("lo:")]
+    if non_loopback:
+        return True, None
+    return False, f"no non-loopback network interface is visible (found: {iface_names or ['<none>']})"
+
+
 def init_distributed(preferred_backend: str = "auto", allow_backend_fallback: bool = True) -> Tuple[int, int, int, torch.device, bool, str]:
     ddp_env = ("RANK" in os.environ and "WORLD_SIZE" in os.environ)
 
@@ -87,6 +104,12 @@ def init_distributed(preferred_backend: str = "auto", allow_backend_fallback: bo
         backend = "nccl" if device.type == "cuda" else "gloo"
     else:
         backend = preferred_backend
+
+    if ddp_env and world_size > 1 and backend == "nccl" and allow_backend_fallback:
+        nccl_ok, nccl_reason = nccl_socket_preflight()
+        if not nccl_ok:
+            print(f"[DDP] NCCL preflight failed: {nccl_reason}. Falling back to gloo before init_process_group.")
+            backend = "gloo"
 
     if ddp_env and world_size > 1 and not dist.is_initialized():
         try:
@@ -129,6 +152,53 @@ def reduce_min(t: torch.Tensor) -> torch.Tensor:
     rt = t.clone()
     dist.all_reduce(rt, op=dist.ReduceOp.MIN)
     return rt
+
+
+def build_ddp_model(
+    model: torch.nn.Module,
+    *,
+    ddp_enabled: bool,
+    ddp_backend: str,
+    rank: int,
+    world_size: int,
+    local_rank: int,
+    find_unused_parameters: bool,
+    broadcast_buffers: bool,
+    allow_backend_fallback: bool,
+    logger: Optional[logging.Logger] = None,
+) -> Tuple[torch.nn.Module, str]:
+    if not ddp_enabled:
+        return model, ddp_backend
+
+    def _wrap(current_backend: str) -> torch.nn.Module:
+        if current_backend == "nccl":
+            return DDP(
+                model,
+                device_ids=[local_rank],
+                output_device=local_rank,
+                find_unused_parameters=find_unused_parameters,
+                broadcast_buffers=broadcast_buffers,
+            )
+        return DDP(
+            model,
+            find_unused_parameters=find_unused_parameters,
+            broadcast_buffers=broadcast_buffers,
+        )
+
+    try:
+        return _wrap(ddp_backend), ddp_backend
+    except Exception as e:
+        if ddp_backend != "nccl" or not allow_backend_fallback:
+            raise
+        msg = f"[DDP] DDP construction with backend=nccl failed: {e}. Falling back to gloo."
+        if logger is not None and is_main_process(rank):
+            logger.warning(msg)
+        else:
+            print(msg)
+        if dist.is_initialized():
+            dist.destroy_process_group()
+        dist.init_process_group(backend="gloo", rank=rank, world_size=world_size)
+        return _wrap("gloo"), "gloo"
 
 
 def setup_logger(log_file: str, rank: int) -> logging.Logger:
@@ -770,15 +840,21 @@ def main():
     model = base_model
 
     if ddp_enabled:
-        model = DDP(
+        model, ddp_backend = build_ddp_model(
             model,
-            device_ids=[local_rank],
-            output_device=local_rank,
+            ddp_enabled=ddp_enabled,
+            ddp_backend=ddp_backend,
+            rank=rank,
+            world_size=world_size,
+            local_rank=local_rank,
             find_unused_parameters=bool(args.find_unused_parameters),
             broadcast_buffers=bool(args.ddp_broadcast_buffers),
+            allow_backend_fallback=bool(args.ddp_backend_fallback or args.ddp_backend == "auto"),
+            logger=logger,
         )
         if is_main_process(rank):
             logger.info(f"[DDP] broadcast_buffers={bool(args.ddp_broadcast_buffers)}")
+            logger.info(f"[DDP] active backend after model wrap: {ddp_backend}")
 
     if is_main_process(rank):
         raw_model = get_raw_model(model)
