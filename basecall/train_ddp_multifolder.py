@@ -123,6 +123,12 @@ def init_distributed(preferred_backend: str = "auto", allow_backend_fallback: bo
         if not nccl_ok:
             print(f"[DDP] NCCL preflight failed: {nccl_reason}. Falling back to gloo before init_process_group.")
             backend = "gloo"
+        elif normalized_iface_expr and normalized_iface_expr != os.environ.get("NCCL_SOCKET_IFNAME"):
+            print(
+                "[DDP] Normalizing NCCL_SOCKET_IFNAME from "
+                f"{os.environ['NCCL_SOCKET_IFNAME']!r} to {normalized_iface_expr!r} for NCCL compatibility."
+            )
+            os.environ["NCCL_SOCKET_IFNAME"] = normalized_iface_expr
 
     if ddp_env and world_size > 1 and not dist.is_initialized():
         try:
