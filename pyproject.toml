@@ -11,6 +11,7 @@ requires-python = ">=3.9"
 dependencies = [
   "numpy",
   "torch",
+  "accelerate",
   "transformers",
   "tqdm",
   "edlib",
