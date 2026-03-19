@@ -23,6 +23,7 @@ import os
 import math
 import socket
 import argparse
+import subprocess
 import matplotlib.pyplot as plt
 import logging
 from typing import Tuple, Optional, Any, Dict, List
@@ -68,11 +69,41 @@ except Exception:
 
 # -------------------- distributed helpers --------------------
 
+def _iface_has_socket_address(iface_name: str, socket_family: Optional[str]) -> bool:
+    if not socket_family:
+        return True
+
+    family_flag = socket_family.strip().upper()
+    if family_flag == "AF_UNSPEC":
+        return True
+    if family_flag == "AF_INET":
+        ip_flag = "-4"
+    elif family_flag == "AF_INET6":
+        ip_flag = "-6"
+    else:
+        return True
+
+    try:
+        probe = subprocess.run(
+            ["ip", "-o", ip_flag, "addr", "show", "dev", iface_name],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError:
+        return True
+
+    return bool(probe.stdout.strip())
+
+
 def nccl_socket_preflight() -> Tuple[bool, Optional[str], Optional[str]]:
+    socket_family = os.environ.get("NCCL_SOCKET_FAMILY")
+
     if os.environ.get("NCCL_SOCKET_IFNAME"):
         iface_names = {name for _, name in socket.if_nameindex()}
         raw_expr = os.environ["NCCL_SOCKET_IFNAME"]
         requested = [x.strip() for x in raw_expr.split(",") if x.strip()]
+        normalized_iface_expr = ",".join(requested) if requested else None
 
         advanced_rules = [rule for rule in requested if rule.startswith("=") or rule.startswith("^")]
         if advanced_rules:
@@ -83,17 +114,30 @@ def nccl_socket_preflight() -> Tuple[bool, Optional[str], Optional[str]]:
             ), None
 
         matched = [name for name in requested if name in iface_names]
-        if matched:
-            return True, None, None
+        if not matched:
+            return False, (
+                f"NCCL_SOCKET_IFNAME={raw_expr!r} does not match any visible network interface "
+                f"(visible={sorted(iface_names)})"
+            ), normalized_iface_expr
+
+        family_compatible = [name for name in matched if _iface_has_socket_address(name, socket_family)]
+        if family_compatible:
+            return True, None, ",".join(family_compatible)
         return False, (
-            f"NCCL_SOCKET_IFNAME={raw_expr!r} does not match any visible network interface "
-            f"(visible={sorted(iface_names)})"
-        ), None
+            f"NCCL_SOCKET_IFNAME={raw_expr!r} matched visible interfaces {matched!r}, but none have a usable "
+            f"{socket_family or 'IP'} address for NCCL bootstrap"
+        ), ",".join(matched)
 
     iface_names = [name for _, name in socket.if_nameindex()]
     non_loopback = [name for name in iface_names if name != "lo" and not name.startswith("lo:")]
+    family_compatible = [name for name in non_loopback if _iface_has_socket_address(name, socket_family)]
+    if family_compatible:
+        return True, None, family_compatible[0]
     if non_loopback:
-        return True, None, None
+        return False, (
+            f"visible non-loopback interfaces {non_loopback!r} do not have a usable {socket_family or 'IP'} "
+            "address for NCCL bootstrap"
+        ), non_loopback[0]
     return False, f"no non-loopback network interface is visible (found: {iface_names or ['<none>']})", None
 
 
@@ -119,7 +163,7 @@ def init_distributed(preferred_backend: str = "auto", allow_backend_fallback: bo
         backend = preferred_backend
 
     if ddp_env and world_size > 1 and backend == "nccl" and allow_backend_fallback:
-        nccl_ok, nccl_reason, _ = nccl_socket_preflight()
+        nccl_ok, nccl_reason, normalized_iface_expr = nccl_socket_preflight()
         if not nccl_ok:
             print(f"[DDP] NCCL preflight failed: {nccl_reason}. Falling back to gloo before init_process_group.")
             backend = "gloo"
@@ -133,9 +177,13 @@ def init_distributed(preferred_backend: str = "auto", allow_backend_fallback: bo
     if ddp_env and world_size > 1 and not dist.is_initialized():
         try:
             dist.init_process_group(backend=backend, rank=rank, world_size=world_size)
+            if backend == "nccl":
+                validate_nccl_runtime(device)
         except Exception as e:
             if backend == "nccl" and allow_backend_fallback:
-                print(f"[DDP] init_process_group with backend=nccl failed: {e}. Falling back to gloo.")
+                print(f"[DDP] NCCL runtime initialization failed: {e}. Falling back to gloo.")
+                if dist.is_initialized():
+                    dist.destroy_process_group()
                 dist.init_process_group(backend="gloo", rank=rank, world_size=world_size)
                 backend = "gloo"
             else:
@@ -145,6 +193,15 @@ def init_distributed(preferred_backend: str = "auto", allow_backend_fallback: bo
         ddp_enabled = False
 
     return rank, world_size, local_rank, device, ddp_enabled, backend
+
+
+def validate_nccl_runtime(device: torch.device) -> None:
+    if device.type != "cuda":
+        return
+
+    probe = torch.zeros(1, device=device)
+    dist.all_reduce(probe, op=dist.ReduceOp.SUM)
+    torch.cuda.synchronize(device)
 
 
 def cleanup_distributed(ddp_enabled: bool):
