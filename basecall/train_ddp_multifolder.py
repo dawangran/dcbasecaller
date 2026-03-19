@@ -21,7 +21,6 @@ train_ddp_multifolder.py
 
 import os
 import math
-import socket
 import argparse
 import matplotlib.pyplot as plt
 import logging
