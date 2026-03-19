@@ -131,6 +131,53 @@ def reduce_min(t: torch.Tensor) -> torch.Tensor:
     return rt
 
 
+def build_ddp_model(
+    model: torch.nn.Module,
+    *,
+    ddp_enabled: bool,
+    ddp_backend: str,
+    rank: int,
+    world_size: int,
+    local_rank: int,
+    find_unused_parameters: bool,
+    broadcast_buffers: bool,
+    allow_backend_fallback: bool,
+    logger: Optional[logging.Logger] = None,
+) -> Tuple[torch.nn.Module, str]:
+    if not ddp_enabled:
+        return model, ddp_backend
+
+    def _wrap(current_backend: str) -> torch.nn.Module:
+        if current_backend == "nccl":
+            return DDP(
+                model,
+                device_ids=[local_rank],
+                output_device=local_rank,
+                find_unused_parameters=find_unused_parameters,
+                broadcast_buffers=broadcast_buffers,
+            )
+        return DDP(
+            model,
+            find_unused_parameters=find_unused_parameters,
+            broadcast_buffers=broadcast_buffers,
+        )
+
+    try:
+        return _wrap(ddp_backend), ddp_backend
+    except Exception as e:
+        if ddp_backend != "nccl" or not allow_backend_fallback:
+            raise
+        msg = f"[DDP] DDP construction with backend=nccl failed: {e}. Falling back to gloo."
+        if logger is not None and is_main_process(rank):
+            logger.warning(msg)
+        else:
+            print(msg)
+        if dist.is_initialized():
+            dist.destroy_process_group()
+        dist.init_process_group(backend="gloo", rank=rank, world_size=world_size)
+        return _wrap("gloo"), "gloo"
+
+
 def setup_logger(log_file: str, rank: int) -> logging.Logger:
     logger = logging.getLogger("basecaller_ddp_multifolder")
     logger.setLevel(logging.INFO)
@@ -770,15 +817,21 @@ def main():
     model = base_model
 
     if ddp_enabled:
-        model = DDP(
+        model, ddp_backend = build_ddp_model(
             model,
-            device_ids=[local_rank],
-            output_device=local_rank,
+            ddp_enabled=ddp_enabled,
+            ddp_backend=ddp_backend,
+            rank=rank,
+            world_size=world_size,
+            local_rank=local_rank,
             find_unused_parameters=bool(args.find_unused_parameters),
             broadcast_buffers=bool(args.ddp_broadcast_buffers),
+            allow_backend_fallback=bool(args.ddp_backend_fallback or args.ddp_backend == "auto"),
+            logger=logger,
         )
         if is_main_process(rank):
             logger.info(f"[DDP] broadcast_buffers={bool(args.ddp_broadcast_buffers)}")
+            logger.info(f"[DDP] active backend after model wrap: {ddp_backend}")
 
     if is_main_process(rank):
         raw_model = get_raw_model(model)
