@@ -31,6 +31,7 @@ from typing import Tuple, Optional, Any, Dict, List
 import numpy as np
 
 import torch
+import torch.distributed as dist
 from accelerate import Accelerator
 from accelerate.utils import DistributedDataParallelKwargs, InitProcessGroupKwargs
 from torch.utils.data import DataLoader, Subset
@@ -98,6 +99,25 @@ def gpu_socket_preflight(backend: str) -> Tuple[bool, Optional[str], Optional[st
     if non_loopback:
         return True, None, non_loopback[0]
     return False, f"no non-loopback network interface is visible (found: {iface_names or ['<none>']})", None
+
+
+def is_backend_available(backend: str) -> bool:
+    backend_name = str(backend).lower()
+    if backend_name == "nccl":
+        return bool(hasattr(dist, "is_nccl_available") and dist.is_nccl_available())
+    if backend_name == "gloo":
+        return bool(hasattr(dist, "is_gloo_available") and dist.is_gloo_available())
+    if backend_name == "mccl":
+        if hasattr(dist, "is_mccl_available"):
+            return bool(dist.is_mccl_available())
+        if hasattr(dist, "Backend"):
+            try:
+                getattr(dist.Backend, "MCCL")
+                return True
+            except AttributeError:
+                return False
+        return False
+    return False
 
 
 def resolve_distributed_backend(args) -> Tuple[str, Optional[str]]:
