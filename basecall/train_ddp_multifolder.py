@@ -125,12 +125,6 @@ def resolve_distributed_backend(args) -> Tuple[str, Optional[str]]:
     backend = args.ddp_backend
     fallback_allowed = bool(args.ddp_backend_fallback)
     info_message: Optional[str] = None
-    if backend in {"nccl", "mccl"} and not is_backend_available(backend):
-        if fallback_allowed:
-            info_message = f"[Accelerate] {backend.upper()} backend requested but is not available in this PyTorch runtime. Falling back to gloo."
-            backend = "gloo"
-        else:
-            raise ValueError(f"{backend.upper()} backend requested, but torch.distributed does not report {backend.upper()} support in this runtime.")
     if ddp_env and backend in {"nccl", "mccl"} and fallback_allowed:
         socket_ok, socket_reason, normalized_iface_expr = gpu_socket_preflight(backend)
         socket_env_name = "MCCL_SOCKET_IFNAME" if backend == "mccl" else "NCCL_SOCKET_IFNAME"
