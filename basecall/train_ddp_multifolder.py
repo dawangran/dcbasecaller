@@ -68,17 +68,19 @@ except Exception:
 
 # -------------------- distributed helpers --------------------
 
-def nccl_socket_preflight() -> Tuple[bool, Optional[str], Optional[str]]:
-    if os.environ.get("NCCL_SOCKET_IFNAME"):
+def gpu_socket_preflight(backend: str) -> Tuple[bool, Optional[str], Optional[str]]:
+    backend_name = str(backend).lower()
+    socket_env_name = "MCCL_SOCKET_IFNAME" if backend_name == "mccl" else "NCCL_SOCKET_IFNAME"
+    if os.environ.get(socket_env_name):
         iface_names = {name for _, name in socket.if_nameindex()}
-        raw_expr = os.environ["NCCL_SOCKET_IFNAME"]
+        raw_expr = os.environ[socket_env_name]
         requested = [x.strip() for x in raw_expr.split(",") if x.strip()]
         normalized_iface_expr = ",".join(requested) if requested else None
 
         advanced_rules = [rule for rule in requested if rule.startswith("=") or rule.startswith("^")]
         if advanced_rules:
             return False, (
-                f"NCCL_SOCKET_IFNAME={raw_expr!r} uses advanced NCCL filter syntax {advanced_rules!r}; "
+                f"{socket_env_name}={raw_expr!r} uses advanced {backend_name.upper()} filter syntax {advanced_rules!r}; "
                 "falling back to gloo because this environment cannot validate or normalize it safely. "
                 f"Use a plain visible interface name such as 'eth0' instead (visible={sorted(iface_names)})."
             ), None
@@ -87,7 +89,7 @@ def nccl_socket_preflight() -> Tuple[bool, Optional[str], Optional[str]]:
         if matched:
             return True, None, ",".join(matched)
         return False, (
-            f"NCCL_SOCKET_IFNAME={raw_expr!r} does not match any visible network interface "
+            f"{socket_env_name}={raw_expr!r} does not match any visible network interface "
             f"(visible={sorted(iface_names)})"
         ), normalized_iface_expr
 
@@ -101,22 +103,20 @@ def nccl_socket_preflight() -> Tuple[bool, Optional[str], Optional[str]]:
 def resolve_distributed_backend(args) -> Tuple[str, Optional[str]]:
     ddp_env = ("RANK" in os.environ and "WORLD_SIZE" in os.environ and int(os.environ.get("WORLD_SIZE", "1")) > 1)
     backend = args.ddp_backend
-    if backend == "auto":
-        backend = "nccl" if torch.cuda.is_available() else "gloo"
-
-    fallback_allowed = bool(args.ddp_backend_fallback or args.ddp_backend == "auto")
+    fallback_allowed = bool(args.ddp_backend_fallback)
     info_message: Optional[str] = None
-    if ddp_env and backend == "nccl" and fallback_allowed:
-        nccl_ok, nccl_reason, normalized_iface_expr = nccl_socket_preflight()
-        if not nccl_ok:
-            info_message = f"[Accelerate] NCCL preflight failed: {nccl_reason}. Falling back to gloo before Accelerator initialization."
+    if ddp_env and backend in {"nccl", "mccl"} and fallback_allowed:
+        socket_ok, socket_reason, normalized_iface_expr = gpu_socket_preflight(backend)
+        socket_env_name = "MCCL_SOCKET_IFNAME" if backend == "mccl" else "NCCL_SOCKET_IFNAME"
+        if not socket_ok:
+            info_message = f"[Accelerate] {backend.upper()} preflight failed: {socket_reason}. Falling back to gloo before Accelerator initialization."
             backend = "gloo"
-        elif normalized_iface_expr and normalized_iface_expr != os.environ.get("NCCL_SOCKET_IFNAME"):
-            original_iface_expr = os.environ.get("NCCL_SOCKET_IFNAME")
-            os.environ["NCCL_SOCKET_IFNAME"] = normalized_iface_expr
+        elif normalized_iface_expr and normalized_iface_expr != os.environ.get(socket_env_name):
+            original_iface_expr = os.environ.get(socket_env_name)
+            os.environ[socket_env_name] = normalized_iface_expr
             info_message = (
-                "[Accelerate] Normalizing NCCL_SOCKET_IFNAME from "
-                f"{original_iface_expr!r} to {normalized_iface_expr!r} for NCCL compatibility."
+                f"[Accelerate] Normalizing {socket_env_name} from "
+                f"{original_iface_expr!r} to {normalized_iface_expr!r} for {backend.upper()} compatibility."
             )
     return backend, info_message
 
@@ -640,10 +640,10 @@ def parse_args():
 
     p.add_argument("--find_unused_parameters", action="store_true",
                    help="Enable DDP unused parameter detection (fix reduction error).")
-    p.add_argument("--ddp_backend", type=str, default="auto", choices=["auto", "nccl", "gloo"],
-                   help="Distributed backend selection. auto prefers NCCL on CUDA and GLOO on CPU.")
+    p.add_argument("--ddp_backend", type=str, default="gloo", choices=["nccl", "gloo", "mccl"],
+                   help="Distributed backend selection. Explicitly choose MCCL, NCCL, or GLOO for the current runtime.")
     p.add_argument("--ddp_backend_fallback", action="store_true",
-                   help="Allow fallback from NCCL to GLOO if NCCL init fails (e.g., no socket interface).")
+                   help="Allow fallback from NCCL/MCCL to GLOO if the selected GPU backend init fails.")
     p.add_argument("--ddp_broadcast_buffers", action="store_true",
                    help="Enable DDP per-forward buffer broadcast. Keep off by default to reduce desync-related NCCL broadcast stalls.")
     p.add_argument("--amp", action="store_true",
