@@ -73,6 +73,7 @@ def nccl_socket_preflight() -> Tuple[bool, Optional[str], Optional[str]]:
         iface_names = {name for _, name in socket.if_nameindex()}
         raw_expr = os.environ["NCCL_SOCKET_IFNAME"]
         requested = [x.strip() for x in raw_expr.split(",") if x.strip()]
+        normalized_iface_expr = ",".join(requested) if requested else None
 
         advanced_rules = [rule for rule in requested if rule.startswith("=") or rule.startswith("^")]
         if advanced_rules:
@@ -84,16 +85,16 @@ def nccl_socket_preflight() -> Tuple[bool, Optional[str], Optional[str]]:
 
         matched = [name for name in requested if name in iface_names]
         if matched:
-            return True, None, None
+            return True, None, ",".join(matched)
         return False, (
             f"NCCL_SOCKET_IFNAME={raw_expr!r} does not match any visible network interface "
             f"(visible={sorted(iface_names)})"
-        ), None
+        ), normalized_iface_expr
 
     iface_names = [name for _, name in socket.if_nameindex()]
     non_loopback = [name for name in iface_names if name != "lo" and not name.startswith("lo:")]
     if non_loopback:
-        return True, None, None
+        return True, None, non_loopback[0]
     return False, f"no non-loopback network interface is visible (found: {iface_names or ['<none>']})", None
 
 
@@ -119,7 +120,7 @@ def init_distributed(preferred_backend: str = "auto", allow_backend_fallback: bo
         backend = preferred_backend
 
     if ddp_env and world_size > 1 and backend == "nccl" and allow_backend_fallback:
-        nccl_ok, nccl_reason, _ = nccl_socket_preflight()
+        nccl_ok, nccl_reason, normalized_iface_expr = nccl_socket_preflight()
         if not nccl_ok:
             print(f"[DDP] NCCL preflight failed: {nccl_reason}. Falling back to gloo before init_process_group.")
             backend = "gloo"
