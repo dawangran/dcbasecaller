@@ -71,7 +71,7 @@ except Exception:
 
 def gpu_socket_preflight(backend: str) -> Tuple[bool, Optional[str], Optional[str]]:
     backend_name = str(backend).lower()
-    socket_env_name = "MCCL_SOCKET_IFNAME" if backend_name == "mccl" else "NCCL_SOCKET_IFNAME"
+    socket_env_name = "NCCL_SOCKET_IFNAME"
     if os.environ.get(socket_env_name):
         iface_names = {name for _, name in socket.if_nameindex()}
         raw_expr = os.environ[socket_env_name]
@@ -107,16 +107,6 @@ def is_backend_available(backend: str) -> bool:
         return bool(hasattr(dist, "is_nccl_available") and dist.is_nccl_available())
     if backend_name == "gloo":
         return bool(hasattr(dist, "is_gloo_available") and dist.is_gloo_available())
-    if backend_name == "mccl":
-        if hasattr(dist, "is_mccl_available"):
-            return bool(dist.is_mccl_available())
-        if hasattr(dist, "Backend"):
-            try:
-                getattr(dist.Backend, "MCCL")
-                return True
-            except AttributeError:
-                return False
-        return False
     return False
 
 
@@ -125,9 +115,9 @@ def resolve_distributed_backend(args) -> Tuple[str, Optional[str]]:
     backend = args.ddp_backend
     fallback_allowed = bool(args.ddp_backend_fallback)
     info_message: Optional[str] = None
-    if ddp_env and backend in {"nccl", "mccl"} and fallback_allowed:
+    if ddp_env and backend == "nccl" and fallback_allowed:
         socket_ok, socket_reason, normalized_iface_expr = gpu_socket_preflight(backend)
-        socket_env_name = "MCCL_SOCKET_IFNAME" if backend == "mccl" else "NCCL_SOCKET_IFNAME"
+        socket_env_name = "NCCL_SOCKET_IFNAME"
         if not socket_ok:
             info_message = f"[Accelerate] {backend.upper()} preflight failed: {socket_reason}. Falling back to gloo before Accelerator initialization."
             backend = "gloo"
@@ -660,10 +650,10 @@ def parse_args():
 
     p.add_argument("--find_unused_parameters", action="store_true",
                    help="Enable DDP unused parameter detection (fix reduction error).")
-    p.add_argument("--ddp_backend", type=str, default="gloo", choices=["nccl", "gloo", "mccl"],
-                   help="Distributed backend selection. Explicitly choose MCCL, NCCL, or GLOO for the current runtime.")
+    p.add_argument("--ddp_backend", type=str, default="gloo", choices=["nccl", "gloo"],
+                   help="Distributed backend selection. Explicitly choose NCCL or GLOO for the current runtime.")
     p.add_argument("--ddp_backend_fallback", action="store_true",
-                   help="Allow fallback from NCCL/MCCL to GLOO if the selected GPU backend init fails.")
+                   help="Allow fallback from NCCL to GLOO if the selected GPU backend init fails.")
     p.add_argument("--ddp_broadcast_buffers", action="store_true",
                    help="Enable DDP per-forward buffer broadcast. Keep off by default to reduce desync-related NCCL broadcast stalls.")
     p.add_argument("--amp", action="store_true",

@@ -197,10 +197,9 @@ basecall-train \
 - `--wandb_job_type`: run type shown in W&B (default `train`).
 - Launch distributed runs with `accelerate launch ... basecall.train_ddp_multifolder`.
 - `--find_unused_parameters` and `--ddp_broadcast_buffers` are forwarded into Accelerate's DDP wrapper settings.
-- `--ddp_backend` explicitly selects the process-group backend (`gloo`, `nccl`, or `mccl`).
-- `--ddp_backend_fallback` allows automatic fallback from NCCL/MCCL to GLOO when the selected GPU backend cannot initialize cleanly.
+- `--ddp_backend` explicitly selects the process-group backend (`gloo` or `nccl`).
+- `--ddp_backend_fallback` allows automatic fallback from NCCL to GLOO when the selected GPU backend cannot initialize cleanly.
 - When using `--ddp_backend nccl`, set `NCCL_SOCKET_IFNAME` if your runtime requires an explicit socket interface.
-- When using `--ddp_backend mccl` on MetaX/MX runtimes, set `MCCL_SOCKET_IFNAME` instead.
 
 Example for grouped condition sweeps:
 
