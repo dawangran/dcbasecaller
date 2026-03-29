@@ -744,6 +744,9 @@ def main():
     local_rank = accelerator.local_process_index
     device = accelerator.device
 
+    if torch.cuda.is_available():
+        torch.cuda.set_device(local_rank)
+
     seed_everything(args.seed + rank)
 
     os.makedirs(args.output_dir, exist_ok=True)
