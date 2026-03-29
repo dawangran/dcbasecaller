@@ -329,7 +329,12 @@ def _normalize_tokens(value: Any) -> str:
     if isinstance(value, str):
         return value
     if isinstance(value, (list, tuple, np.ndarray)):
-        if not value:
+        if isinstance(value, np.ndarray):
+            if value.size == 0:
+                return ""
+            if np.issubdtype(value.dtype, np.integer) and np.any(value < 0):
+                return "".join(f"<|bwav:{int(x)}|>" for x in value.reshape(-1) if int(x) >= 0)
+        elif not value:
             return ""
         if all(isinstance(x, bytes) for x in value):
             return "".join(x.decode("utf-8") for x in value)
