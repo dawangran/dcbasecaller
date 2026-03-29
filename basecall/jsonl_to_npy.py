@@ -15,7 +15,6 @@ from __future__ import annotations
 import argparse
 import gzip
 import json
-import re
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -31,17 +30,6 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--max_files", type=int, default=100, help="Read at most the first N files after sorting (default: 100).")
     p.add_argument("--files_per_shard", type=int, default=10, help="Merge every K jsonl files into one npy shard pair (default: 10).")
     p.add_argument("--ref_max_len", type=int, default=800, help="Pad/truncate reference labels to fixed length (default: 800).")
-    p.add_argument(
-        "--pack_tokens_as_ids",
-        action="store_true",
-        help="Extract bwav ids from text and save tokens as padded int32 ndarray.",
-    )
-    p.add_argument(
-        "--token_max_len",
-        type=int,
-        default=800,
-        help="Pad/truncate token ids to fixed length when --pack_tokens_as_ids is enabled (default: 800).",
-    )
     p.add_argument("--recursive", action="store_true", help="Recursively scan input_dir.")
     return p.parse_args()
 
@@ -106,22 +94,6 @@ def pad_or_truncate(values: list[int], max_len: int) -> np.ndarray:
     return out
 
 
-_BWAV_RE = re.compile(r"<\|bwav:(-?\d+)\|>")
-
-
-def parse_bwav_token_ids(text: str) -> list[int]:
-    return [int(m.group(1)) for m in _BWAV_RE.finditer(text)]
-
-
-def pad_or_truncate_int32(values: list[int], max_len: int, pad_value: int = -1) -> np.ndarray:
-    out = np.full(max_len, pad_value, dtype=np.int32)
-    if not values:
-        return out
-    keep = values[:max_len]
-    out[: len(keep)] = np.asarray(keep, dtype=np.int32)
-    return out
-
-
 def main() -> None:
     args = parse_args()
     input_dir = Path(args.input_dir)
@@ -134,8 +106,6 @@ def main() -> None:
         raise ValueError("--files_per_shard must be > 0")
     if args.ref_max_len <= 0:
         raise ValueError("--ref_max_len must be > 0")
-    if args.pack_tokens_as_ids and args.token_max_len <= 0:
-        raise ValueError("--token_max_len must be > 0 when --pack_tokens_as_ids is enabled")
 
     all_files = iter_jsonl_paths(input_dir, recursive=bool(args.recursive))
     selected_files = all_files[: args.max_files]
@@ -149,7 +119,7 @@ def main() -> None:
 
     for start in range(0, len(selected_files), args.files_per_shard):
         batch_files = selected_files[start : start + args.files_per_shard]
-        tokens: list[Any] = []
+        tokens: list[str] = []
         references: list[np.ndarray] = []
         skipped = 0
 
@@ -161,20 +131,12 @@ def main() -> None:
                     skipped += 1
                     continue
                 labels = parse_bases(bases)
-                if args.pack_tokens_as_ids:
-                    token_ids = parse_bwav_token_ids(str(text))
-                    tokens.append(pad_or_truncate_int32(token_ids, args.token_max_len, pad_value=-1))
-                else:
-                    tokens.append(str(text))
+                tokens.append(str(text))
                 references.append(pad_or_truncate(labels, args.ref_max_len))
 
         tok_path = output_dir / f"tokens_{shard_idx:04d}.npy"
         ref_path = output_dir / f"reference_{shard_idx:04d}.npy"
-        if args.pack_tokens_as_ids:
-            token_arr = np.stack(tokens, axis=0) if tokens else np.zeros((0, args.token_max_len), dtype=np.int32)
-            np.save(tok_path, token_arr, allow_pickle=True)
-        else:
-            np.save(tok_path, np.asarray(tokens, dtype=object), allow_pickle=True)
+        np.save(tok_path, np.asarray(tokens, dtype=object), allow_pickle=True)
         np.save(ref_path, np.stack(references, axis=0) if references else np.zeros((0, args.ref_max_len), dtype=np.int64), allow_pickle=True)
 
         total_records += len(tokens)
