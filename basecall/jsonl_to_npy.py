@@ -20,6 +20,8 @@ from typing import Any, Iterable
 
 import numpy as np
 
+BASE2ID = {"A": 1, "C": 2, "G": 3, "T": 4}
+
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
@@ -27,6 +29,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--output_dir", type=str, required=True, help="Output folder for tokens_*.npy/reference_*.npy.")
     p.add_argument("--max_files", type=int, default=100, help="Read at most the first N files after sorting (default: 100).")
     p.add_argument("--files_per_shard", type=int, default=10, help="Merge every K jsonl files into one npy shard pair (default: 10).")
+    p.add_argument("--ref_max_len", type=int, default=800, help="Pad/truncate reference labels to fixed length (default: 800).")
     p.add_argument("--recursive", action="store_true", help="Recursively scan input_dir.")
     return p.parse_args()
 
@@ -60,6 +63,37 @@ def iter_records(path: Path) -> Iterable[dict[str, Any]]:
             yield obj
 
 
+def parse_bases(value: Any) -> list[int]:
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple, np.ndarray)):
+        if len(value) == 0:
+            return []
+        if all(isinstance(x, (int, np.integer)) for x in value):
+            return [int(x) for x in value]
+        if all(isinstance(x, str) for x in value):
+            if all(x.strip().isdigit() for x in value):
+                return [int(x) for x in value]
+            return [BASE2ID.get(x.upper(), 0) for x in value]
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return []
+        if text.isdigit():
+            return [int(ch) for ch in text]
+        return [BASE2ID.get(ch.upper(), 0) for ch in text]
+    return []
+
+
+def pad_or_truncate(values: list[int], max_len: int) -> np.ndarray:
+    out = np.zeros(max_len, dtype=np.int64)
+    if not values:
+        return out
+    keep = values[:max_len]
+    out[: len(keep)] = np.asarray(keep, dtype=np.int64)
+    return out
+
+
 def main() -> None:
     args = parse_args()
     input_dir = Path(args.input_dir)
@@ -70,6 +104,8 @@ def main() -> None:
         raise ValueError("--max_files must be > 0")
     if args.files_per_shard <= 0:
         raise ValueError("--files_per_shard must be > 0")
+    if args.ref_max_len <= 0:
+        raise ValueError("--ref_max_len must be > 0")
 
     all_files = iter_jsonl_paths(input_dir, recursive=bool(args.recursive))
     selected_files = all_files[: args.max_files]
@@ -84,7 +120,7 @@ def main() -> None:
     for start in range(0, len(selected_files), args.files_per_shard):
         batch_files = selected_files[start : start + args.files_per_shard]
         tokens: list[str] = []
-        references: list[Any] = []
+        references: list[np.ndarray] = []
         skipped = 0
 
         for path in batch_files:
@@ -94,13 +130,14 @@ def main() -> None:
                 if not text or bases is None:
                     skipped += 1
                     continue
+                labels = parse_bases(bases)
                 tokens.append(str(text))
-                references.append(bases)
+                references.append(pad_or_truncate(labels, args.ref_max_len))
 
         tok_path = output_dir / f"tokens_{shard_idx:04d}.npy"
         ref_path = output_dir / f"reference_{shard_idx:04d}.npy"
         np.save(tok_path, np.asarray(tokens, dtype=object), allow_pickle=True)
-        np.save(ref_path, np.asarray(references, dtype=object), allow_pickle=True)
+        np.save(ref_path, np.stack(references, axis=0) if references else np.zeros((0, args.ref_max_len), dtype=np.int64), allow_pickle=True)
 
         total_records += len(tokens)
         total_skipped += skipped
