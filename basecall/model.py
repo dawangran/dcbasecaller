@@ -154,6 +154,7 @@ class BasecallModel(nn.Module):
         model_path: str,
         num_classes: int = NUM_CLASSES,
         hidden_layer: int = -1,          # 选哪一层 hidden_states
+        learnable_fuse_last_n_layers: int = 0,  # 0=关闭；>0 时对最后 N 层做 softmax 可学习加权融合
         feature_source: str = "hidden",   # hidden | embedding
         freeze_backbone: bool = False,   # ✅ 新增：是否冻结基座（默认不冻结，保持你原行为）
         reset_backbone_weights: bool = False,  # ✅ 可选：重置基座权重用于消融
@@ -172,6 +173,7 @@ class BasecallModel(nn.Module):
     ):
         super().__init__()
         self.hidden_layer = hidden_layer
+        self.learnable_fuse_last_n_layers = max(0, int(learnable_fuse_last_n_layers))
         self.feature_source = feature_source
         self.freeze_backbone = bool(freeze_backbone)
         self.unfreeze_last_n_layers = max(0, int(unfreeze_last_n_layers))
@@ -199,6 +201,11 @@ class BasecallModel(nn.Module):
 
         if self.feature_source not in {"hidden", "embedding"}:
             raise ValueError(f"Unsupported feature_source: {self.feature_source}. Use 'hidden' or 'embedding'.")
+        if self.feature_source != "hidden" and self.learnable_fuse_last_n_layers > 0:
+            raise ValueError("learnable_fuse_last_n_layers requires feature_source='hidden'.")
+        self.layer_fuse_logits: nn.Parameter | None = None
+        if self.learnable_fuse_last_n_layers > 0:
+            self.layer_fuse_logits = nn.Parameter(torch.zeros(self.learnable_fuse_last_n_layers))
 
         # 省显存：关闭 cache（很多 decoder-only 默认开）
         if hasattr(self.backbone.config, "use_cache"):
@@ -356,13 +363,25 @@ class BasecallModel(nn.Module):
 
             hidden_states = outputs.hidden_states  # tuple(len = n_layers + 1)
 
-            try:
-                hidden = hidden_states[self.hidden_layer]
-            except IndexError:
-                raise ValueError(
-                    f"hidden_layer={self.hidden_layer} out of range "
-                    f"(num hidden states = {len(hidden_states)})"
-                )
+            if self.learnable_fuse_last_n_layers > 0:
+                n_hidden_layers = len(hidden_states) - 1
+                if n_hidden_layers < self.learnable_fuse_last_n_layers:
+                    raise ValueError(
+                        "learnable_fuse_last_n_layers out of range "
+                        f"(requested={self.learnable_fuse_last_n_layers}, available_hidden_layers={n_hidden_layers})."
+                    )
+                selected = hidden_states[-self.learnable_fuse_last_n_layers:]
+                stacked = torch.stack(selected, dim=0)  # [N, B, T, H]
+                weights = torch.softmax(self.layer_fuse_logits, dim=0).to(stacked.dtype)  # [N]
+                hidden = torch.sum(stacked * weights.view(-1, 1, 1, 1), dim=0)
+            else:
+                try:
+                    hidden = hidden_states[self.hidden_layer]
+                except IndexError:
+                    raise ValueError(
+                        f"hidden_layer={self.hidden_layer} out of range "
+                        f"(num hidden states = {len(hidden_states)})"
+                    )
 
         hidden = self.pre_head(hidden)
         logits_btc = self.base_head(hidden)

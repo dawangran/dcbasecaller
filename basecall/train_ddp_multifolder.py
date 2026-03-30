@@ -609,6 +609,8 @@ def parse_args():
 
     p.add_argument("--model_name_or_path", type=str, required=True)
     p.add_argument("--hidden-layer",type=int,default=-1, help="Which backbone hidden layer to use when --feature_source hidden (-1=last, -2=second last, etc.)")
+    p.add_argument("--learnable_fuse_last_n_layers", type=int, default=0,
+                   help="If >0, learn a softmax-weighted fusion over the last N hidden layers (overrides --hidden-layer).")
     p.add_argument("--feature_source", "--feature-source", choices=["hidden", "embedding"], default="hidden",
                    help="Use transformer hidden states or input embeddings as head input features.")
 
@@ -761,7 +763,10 @@ def main():
         if backend_note:
             logger.warning(backend_note)
         logger.info(f"[PreHead] type={args.pre_head_type} transformer_nhead={args.pre_head_transformer_nhead}")
-        logger.info(f"[FeatureSource] source={args.feature_source} hidden_layer={args.hidden_layer}")
+        logger.info(
+            f"[FeatureSource] source={args.feature_source} hidden_layer={args.hidden_layer} "
+            f"learnable_fuse_last_n_layers={args.learnable_fuse_last_n_layers}"
+        )
         if args.quick:
             logger.info("[Quick] enabled: freeze_backbone=True, ctc_crf_state_len=5, ctc_crf_blank_score=0, head_output_scale=5, head_output_activation=tanh, head_type=ctc_crf, pre_ctc_module=none")
 
@@ -781,6 +786,7 @@ def main():
         model_path=args.model_name_or_path,
         num_classes=num_classes if num_classes is not None else None,
         hidden_layer=args.hidden_layer,
+        learnable_fuse_last_n_layers=args.learnable_fuse_last_n_layers,
         feature_source=args.feature_source,
         freeze_backbone=bool(args.freeze_backbone),
         reset_backbone_weights=bool(args.reset_backbone_weights),
