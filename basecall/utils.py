@@ -88,3 +88,14 @@ def infer_head_config_from_state_dict(
         "head_type": _infer_head_type(),
         "num_classes": int(_infer_num_classes()),
     }
+
+
+def infer_pre_head_type_from_state_dict(state_dict: Dict[str, torch.Tensor]) -> str:
+    keys = state_dict.keys()
+    if any(k.startswith("pre_head.blocks.") for k in keys):
+        return "tcn"
+    if any(k.startswith("pre_head.lstm.") for k in keys):
+        return "bilstm"
+    if any(k.startswith("pre_head.encoder.layers.") for k in keys):
+        return "transformer"
+    return "none"

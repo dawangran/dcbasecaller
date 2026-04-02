@@ -19,7 +19,14 @@ from tqdm import tqdm
 
 from .ctc_crf import decode as ctc_crf_decode
 from .model import BasecallModel
-from .utils import ID2BASE, BLANK_IDX, seed_everything, resolve_input_lengths, infer_head_config_from_state_dict
+from .utils import (
+    ID2BASE,
+    BLANK_IDX,
+    seed_everything,
+    resolve_input_lengths,
+    infer_head_config_from_state_dict,
+    infer_pre_head_type_from_state_dict,
+)
 from .metrics import ctc_viterbi_decode, koi_beam_search_decode
 
 
@@ -225,8 +232,8 @@ def main():
                     help="Optional activation applied to head output logits.")
     ap.add_argument("--head_output_scale", type=float, default=None,
                     help="Optional scalar applied to head output logits (after activation).")
-    ap.add_argument("--pre_head_type", choices=["none", "bilstm", "transformer", "tcn"], default="none",
-                    help="Optional module before CTC-CRF head.")
+    ap.add_argument("--pre_head_type", choices=["auto", "none", "bilstm", "transformer", "tcn"], default="auto",
+                    help="Optional module before CTC-CRF head. Default auto-infers from checkpoint.")
     ap.add_argument("--pre_head_transformer_nhead", type=int, default=8,
                     help="Attention heads for --pre_head_type transformer.")
     args = ap.parse_args()
@@ -249,6 +256,10 @@ def main():
         sd = state
     head_config = infer_head_config_from_state_dict(sd)
     head_type = args.head_type or head_config.get("head_type", "ctc")
+    pre_head_type = args.pre_head_type
+    if pre_head_type == "auto":
+        pre_head_type = infer_pre_head_type_from_state_dict(sd)
+        print(f"[Model] pre_head_type auto -> {pre_head_type}")
     # load model
     n_base = len(ID2BASE) - 1
     state_len = args.ctc_crf_state_len
@@ -276,7 +287,7 @@ def main():
         feature_source=args.feature_source,
         head_output_activation=args.head_output_activation,
         head_output_scale=args.head_output_scale,
-        pre_head_type=args.pre_head_type,
+        pre_head_type=pre_head_type,
         pre_head_transformer_nhead=args.pre_head_transformer_nhead,
         head_type=head_type,
         head_crf_blank_score=float(args.ctc_crf_blank_score),

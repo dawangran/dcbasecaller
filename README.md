@@ -286,7 +286,7 @@ basecall-eval \
 - `--fastq_q`: fixed Phred quality value for FASTQ output (default: 20).
 - `--hidden_layer`: which backbone hidden state to use when `--feature_source hidden` (default: -1).
 - `--feature_source`/`--feature-source`: choose `hidden` (default) or `embedding` for model features before pre-head/head.
-- `--pre_head_type`, `--pre_head_transformer_nhead`: optional pre-head module settings (must match training).
+- `--pre_head_type`, `--pre_head_transformer_nhead`: pre-head settings; `--pre_head_type` defaults to `auto` and infers from checkpoint (`none`/`bilstm`/`transformer`/`tcn`), but you can override manually.
 - `--recursive`: scan subfolders for `.jsonl.gz` or tokens/reference `.npy`.
 - Eval startup prints a model summary (`pre_head`, `head`, parameter counts) and full module structure for quick sanity-checking.
 
@@ -338,7 +338,7 @@ basecall-infer \
 - `--batch_size`: number of reads per inference batch.
 - `--hidden_layer`: which backbone hidden state to use when `--feature_source hidden` (default: -1).
 - `--feature_source`/`--feature-source`: choose `hidden` (default) or `embedding` for model features before pre-head/head.
-- `--pre_head_type`, `--pre_head_transformer_nhead`: optional pre-head module settings (must match training).
+- `--pre_head_type`, `--pre_head_transformer_nhead`: pre-head settings; `--pre_head_type` defaults to `auto` and infers from checkpoint (`none`/`bilstm`/`transformer`/`tcn`), but you can override manually.
 - Inference startup prints a model summary (`pre_head`, `head`, parameter counts) and full module structure for quick sanity-checking.
 
 **Decoding**

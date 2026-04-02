@@ -39,7 +39,14 @@ from .data_multifolder import (
 from .ctc_crf import decode as ctc_crf_decode
 from .metrics import ctc_viterbi_decode, koi_beam_search_decode, batch_bonito_accuracy, cal_bonito_accuracy, parasail_error_counts
 from .model import BasecallModel
-from .utils import ID2BASE, BLANK_IDX, seed_everything, infer_head_config_from_state_dict, resolve_input_lengths
+from .utils import (
+    ID2BASE,
+    BLANK_IDX,
+    seed_everything,
+    infer_head_config_from_state_dict,
+    infer_pre_head_type_from_state_dict,
+    resolve_input_lengths,
+)
 from .callback import plot_alignment_heatmap, plot_aligned_heatmap_png, align_sequences_indel_aware
 
 
@@ -287,8 +294,8 @@ def main() -> None:
                     help="Optional activation applied to head output logits.")
     ap.add_argument("--head_output_scale", type=float, default=None,
                     help="Optional scalar applied to head output logits (after activation).")
-    ap.add_argument("--pre_head_type", choices=["none", "bilstm", "transformer", "tcn"], default="none",
-                    help="Optional module before CTC-CRF head.")
+    ap.add_argument("--pre_head_type", choices=["auto", "none", "bilstm", "transformer", "tcn"], default="auto",
+                    help="Optional module before CTC-CRF head. Default auto-infers from checkpoint.")
     ap.add_argument("--pre_head_transformer_nhead", type=int, default=8,
                     help="Attention heads for --pre_head_type transformer.")
     ap.add_argument("--acc_balanced", action="store_true",
@@ -321,6 +328,10 @@ def main() -> None:
     state_dict = load_checkpoint_state(args.ckpt)
     head_config = infer_head_config_from_state_dict(state_dict)
     head_type = args.head_type or head_config.get("head_type", "ctc")
+    pre_head_type = args.pre_head_type
+    if pre_head_type == "auto":
+        pre_head_type = infer_pre_head_type_from_state_dict(state_dict)
+        print(f"[Model] pre_head_type auto -> {pre_head_type}")
     n_base = len(ID2BASE) - 1
     state_len = args.ctc_crf_state_len
     decoder_mode = args.decoder
@@ -347,7 +358,7 @@ def main() -> None:
         feature_source=args.feature_source,
         head_output_activation=args.head_output_activation,
         head_output_scale=args.head_output_scale,
-        pre_head_type=args.pre_head_type,
+        pre_head_type=pre_head_type,
         pre_head_transformer_nhead=args.pre_head_transformer_nhead,
         head_type=head_type,
         head_crf_blank_score=float(args.ctc_crf_blank_score),
