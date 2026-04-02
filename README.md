@@ -272,7 +272,7 @@ basecall-eval \
 - `--model_name_or_path`: HuggingFace model ID or local path.
 - `--ckpt`: checkpoint path.
 - `--beam_width`: beam width for ont-koi `beam_search`.
-- `--koi_beam_cut`, `--koi_scale`, `--koi_offset`, `--koi_blank_score`, `--koi_reverse`: parameters for the Koi `beam_search` decoder.
+- Koi decoder advanced parameters in eval are fixed internally (`beam_cut=100`, `scale=1`, `offset=0`, `blank_score=2`, `reverse=False`) to simplify CLI usage.
 - `--ctc_crf_blank_score`: blank score used by CTC-CRF head logits (should match training setting).
 - `--decoder`: choose `auto`, `ctc_viterbi`, `koi`, or `ctc_crf` for prediction/metrics (`auto`: CTC->`ctc_viterbi`, CTC-CRF->`ctc_crf`).
 - `--head_type`: optional override for checkpoint head type (`ctc` or `ctc_crf`, default auto-infer).
