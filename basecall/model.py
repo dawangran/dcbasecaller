@@ -144,6 +144,75 @@ class TransformerPreHead(nn.Module):
         return self.encoder(x)
 
 
+class TCNBlock(nn.Module):
+    def __init__(self, channels: int, kernel_size: int, dilation: int, dropout: float = 0.1) -> None:
+        super().__init__()
+        padding = ((kernel_size - 1) * dilation) // 2
+        self.conv1 = nn.Conv1d(
+            in_channels=channels,
+            out_channels=channels,
+            kernel_size=kernel_size,
+            dilation=dilation,
+            padding=padding,
+        )
+        self.conv2 = nn.Conv1d(
+            in_channels=channels,
+            out_channels=channels,
+            kernel_size=kernel_size,
+            dilation=dilation,
+            padding=padding,
+        )
+        self.norm1 = nn.LayerNorm(channels)
+        self.norm2 = nn.LayerNorm(channels)
+        self.dropout = nn.Dropout(dropout)
+        self.activation = nn.GELU()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        residual = x
+        y = x.transpose(1, 2)
+        y = self.conv1(y).transpose(1, 2)
+        y = self.norm1(y)
+        y = self.activation(y)
+        y = self.dropout(y)
+
+        y = y.transpose(1, 2)
+        y = self.conv2(y).transpose(1, 2)
+        y = self.norm2(y)
+        y = self.activation(y)
+        y = self.dropout(y)
+        return residual + y
+
+
+class TCNPreHead(nn.Module):
+    def __init__(
+        self,
+        model_dim: int,
+        kernel_size: int = 3,
+        num_layers: int = 4,
+        dropout: float = 0.1,
+    ) -> None:
+        super().__init__()
+        if kernel_size % 2 == 0:
+            raise ValueError("TCN kernel_size must be odd to keep sequence length unchanged.")
+        self.blocks = nn.ModuleList(
+            [
+                TCNBlock(
+                    channels=model_dim,
+                    kernel_size=kernel_size,
+                    dilation=2**layer_idx,
+                    dropout=dropout,
+                )
+                for layer_idx in range(num_layers)
+            ]
+        )
+        self.output_dim = model_dim
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        for block in self.blocks:
+            x = block(x)
+        return x
+
+
 class BasecallModel(nn.Module):
     """
     input_ids: [B, T]
@@ -304,6 +373,8 @@ class BasecallModel(nn.Module):
                     f"hidden_size={hidden_size} must be divisible by transformer nhead={transformer_nhead}."
                 )
             return TransformerPreHead(model_dim=hidden_size, nhead=transformer_nhead)
+        if pre_head_type == "tcn":
+            return TCNPreHead(model_dim=hidden_size)
         raise ValueError(f"Unsupported pre_head_type: {pre_head_type}")
 
     def _get_transformer_layers(self) -> nn.ModuleList:

@@ -22,6 +22,17 @@ from .model import BasecallModel
 from .utils import ID2BASE, BLANK_IDX, seed_everything, resolve_input_lengths, infer_head_config_from_state_dict
 from .metrics import ctc_viterbi_decode, koi_beam_search_decode
 
+
+def _print_model_structure(model: torch.nn.Module, *, prefix: str = "[Model]") -> None:
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"{prefix} class={model.__class__.__name__}")
+    print(f"{prefix} pre_head={model.pre_head.__class__.__name__} head={model.base_head.__class__.__name__}")
+    print(f"{prefix} params total={total_params:,} trainable={trainable_params:,}")
+    print(f"{prefix} structure:")
+    print(model)
+
+
 def _phred_to_char(q: int) -> str:
     # standard Sanger FASTQ (Phred+33)
     q = min(max(q, 0), 93)
@@ -214,7 +225,7 @@ def main():
                     help="Optional activation applied to head output logits.")
     ap.add_argument("--head_output_scale", type=float, default=None,
                     help="Optional scalar applied to head output logits (after activation).")
-    ap.add_argument("--pre_head_type", choices=["none", "bilstm", "transformer"], default="none",
+    ap.add_argument("--pre_head_type", choices=["none", "bilstm", "transformer", "tcn"], default="none",
                     help="Optional module before CTC-CRF head.")
     ap.add_argument("--pre_head_transformer_nhead", type=int, default=8,
                     help="Attention heads for --pre_head_type transformer.")
@@ -275,6 +286,7 @@ def main():
     ).to(device)
     model.load_state_dict(sd, strict=False)
     model.eval()
+    _print_model_structure(model)
 
     tokenizer = model.tokenizer  # 你的 BasecallModel 里应有
 

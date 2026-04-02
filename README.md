@@ -170,9 +170,26 @@ basecall-train \
 - `--head_output_activation`: optional activation for head logits (e.g. `tanh` for Bonito-style scaling).
 - `--head_output_scale`: optional scalar multiplier for head logits (applied after activation).
 - `--head_type`: select output head (`ctc` or `ctc_crf`).
-- `--pre_head_type`: optional adapter before CRF head (`none`, `bilstm`, `transformer`).
+- `--pre_head_type`: optional adapter before CRF head (`none`, `bilstm`, `transformer`, `tcn`).
 - `--pre_ctc_module`: alias of `--pre_head_type`.
-- `--pre_head_transformer_nhead`: attention heads when `--pre_head_type transformer`.
+- `--pre_head_transformer_nhead`: attention heads when `--pre_head_type transformer` (ignored for other pre-head types, including `tcn`).
+
+Pre-head quick reference:
+
+- `none`: no extra temporal module; fastest baseline.
+- `bilstm`: 1-layer BiLSTM pre-head (`hidden_dim=128`, bidirectional output dim = 256).
+- `transformer`: 1-layer TransformerEncoder pre-head (set attention heads with `--pre_head_transformer_nhead`).
+- `tcn`: residual dilated 1D-conv pre-head (fixed defaults in current code: `kernel_size=3`, `num_layers=4`, dilations `1,2,4,8`, `dropout=0.1`).
+
+Example (enable TCN pre-head in training):
+
+```bash
+basecall-train \
+  --jsonl_paths /path/to/data \
+  --model_name_or_path <hf-model> \
+  --head_type ctc_crf \
+  --pre_head_type tcn
+```
 
 
 **Optimization**
@@ -271,6 +288,7 @@ basecall-eval \
 - `--feature_source`/`--feature-source`: choose `hidden` (default) or `embedding` for model features before pre-head/head.
 - `--pre_head_type`, `--pre_head_transformer_nhead`: optional pre-head module settings (must match training).
 - `--recursive`: scan subfolders for `.jsonl.gz` or tokens/reference `.npy`.
+- Eval startup prints a model summary (`pre_head`, `head`, parameter counts) and full module structure for quick sanity-checking.
 
 ### Outputs
 
@@ -321,6 +339,7 @@ basecall-infer \
 - `--hidden_layer`: which backbone hidden state to use when `--feature_source hidden` (default: -1).
 - `--feature_source`/`--feature-source`: choose `hidden` (default) or `embedding` for model features before pre-head/head.
 - `--pre_head_type`, `--pre_head_transformer_nhead`: optional pre-head module settings (must match training).
+- Inference startup prints a model summary (`pre_head`, `head`, parameter counts) and full module structure for quick sanity-checking.
 
 **Decoding**
 - `--beam_width`: beam search width.
@@ -353,7 +372,7 @@ basecall-infer \
 basecall-inspect --ckpt ckpt_best.pt
 ```
 
-This prints inferred head settings and suggested `basecall-eval`/`basecall-infer` flags.
+This prints inferred head settings plus a checkpoint-side structure summary (inferred pre-head type and parameter totals), which helps verify whether the checkpoint matches your expected model design before running eval/infer.
 
 ## 6) Minimal runnable demo
 

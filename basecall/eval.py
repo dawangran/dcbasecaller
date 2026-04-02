@@ -43,6 +43,16 @@ from .utils import ID2BASE, BLANK_IDX, seed_everything, infer_head_config_from_s
 from .callback import plot_alignment_heatmap, plot_aligned_heatmap_png, align_sequences_indel_aware
 
 
+def _print_model_structure(model: torch.nn.Module, *, prefix: str = "[Model]") -> None:
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"{prefix} class={model.__class__.__name__}")
+    print(f"{prefix} pre_head={model.pre_head.__class__.__name__} head={model.base_head.__class__.__name__}")
+    print(f"{prefix} params total={total_params:,} trainable={trainable_params:,}")
+    print(f"{prefix} structure:")
+    print(model)
+
+
 def _parse_cigar(cigar: str) -> List[str]:
     ops = []
     num = ""
@@ -277,7 +287,7 @@ def main() -> None:
                     help="Optional activation applied to head output logits.")
     ap.add_argument("--head_output_scale", type=float, default=None,
                     help="Optional scalar applied to head output logits (after activation).")
-    ap.add_argument("--pre_head_type", choices=["none", "bilstm", "transformer"], default="none",
+    ap.add_argument("--pre_head_type", choices=["none", "bilstm", "transformer", "tcn"], default="none",
                     help="Optional module before CTC-CRF head.")
     ap.add_argument("--pre_head_transformer_nhead", type=int, default=8,
                     help="Attention heads for --pre_head_type transformer.")
@@ -347,6 +357,7 @@ def main() -> None:
     ).to(device)
     model.load_state_dict(state_dict, strict=False)
     model.eval()
+    _print_model_structure(model)
 
     collate_fn = create_collate_fn(model.tokenizer)
     loader = DataLoader(
