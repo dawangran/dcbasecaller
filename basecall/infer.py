@@ -19,7 +19,14 @@ from tqdm import tqdm
 
 from .ctc_crf import decode as ctc_crf_decode
 from .model import BasecallModel
-from .utils import ID2BASE, BLANK_IDX, seed_everything, resolve_input_lengths, infer_head_config_from_state_dict
+from .utils import (
+    ID2BASE,
+    BLANK_IDX,
+    seed_everything,
+    resolve_input_lengths,
+    infer_head_config_from_state_dict,
+    infer_pre_head_type_from_state_dict,
+)
 from .metrics import ctc_viterbi_decode, koi_beam_search_decode
 
 
@@ -193,18 +200,8 @@ def main():
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--amp", action="store_true")
     ap.add_argument("--beam_width", type=int, default=32)
-    ap.add_argument("--koi_beam_cut", type=float, default=100.0,
-                    help="Beam cut value for Koi beam_search decoding.")
-    ap.add_argument("--koi_scale", type=float, default=1.0,
-                    help="Scale applied to scores for Koi beam_search decoding.")
-    ap.add_argument("--koi_offset", type=float, default=0.0,
-                    help="Offset applied to scores for Koi beam_search decoding.")
-    ap.add_argument("--koi_blank_score", type=float, default=2.0,
-                    help="Blank score used for Koi beam_search decoding.")
     ap.add_argument("--ctc_crf_blank_score", type=float, default=2.0,
                     help="Blank score used by CTC-CRF head logits (keep consistent with training).")
-    ap.add_argument("--koi_reverse", action="store_true",
-                    help="Reverse sequence output for Koi beam_search decoding.")
     ap.add_argument("--decoder", choices=["auto", "ctc_viterbi", "koi", "ctc_crf"], default="auto",
                     help="Decoder to use. auto picks ctc_viterbi for CTC head and ctc_crf for CTC-CRF head.")
     ap.add_argument("--head_type", choices=["ctc", "ctc_crf"], default=None,
@@ -221,12 +218,8 @@ def main():
                     help="If >0, learn a softmax-weighted fusion over the last N hidden layers (overrides --hidden_layer).")
     ap.add_argument("--feature_source", "--feature-source", choices=["hidden", "embedding"], default="hidden",
                     help="Use transformer hidden states or input embeddings as head input features.")
-    ap.add_argument("--head_output_activation", choices=["tanh", "relu"], default=None,
-                    help="Optional activation applied to head output logits.")
-    ap.add_argument("--head_output_scale", type=float, default=None,
-                    help="Optional scalar applied to head output logits (after activation).")
-    ap.add_argument("--pre_head_type", choices=["none", "bilstm", "transformer", "tcn"], default="none",
-                    help="Optional module before CTC-CRF head.")
+    ap.add_argument("--pre_head_type", choices=["auto", "none", "bilstm", "transformer", "tcn"], default="auto",
+                    help="Optional module before CTC-CRF head. Default auto-infers from checkpoint.")
     ap.add_argument("--pre_head_transformer_nhead", type=int, default=8,
                     help="Attention heads for --pre_head_type transformer.")
     args = ap.parse_args()
@@ -249,6 +242,10 @@ def main():
         sd = state
     head_config = infer_head_config_from_state_dict(sd)
     head_type = args.head_type or head_config.get("head_type", "ctc")
+    pre_head_type = args.pre_head_type
+    if pre_head_type == "auto":
+        pre_head_type = infer_pre_head_type_from_state_dict(sd)
+        print(f"[Model] pre_head_type auto -> {pre_head_type}")
     # load model
     n_base = len(ID2BASE) - 1
     state_len = args.ctc_crf_state_len
@@ -274,9 +271,7 @@ def main():
         hidden_layer=args.hidden_layer,
         learnable_fuse_last_n_layers=args.learnable_fuse_last_n_layers,
         feature_source=args.feature_source,
-        head_output_activation=args.head_output_activation,
-        head_output_scale=args.head_output_scale,
-        pre_head_type=args.pre_head_type,
+        pre_head_type=pre_head_type,
         pre_head_transformer_nhead=args.pre_head_transformer_nhead,
         head_type=head_type,
         head_crf_blank_score=float(args.ctc_crf_blank_score),
@@ -327,11 +322,11 @@ def main():
                     pred_ids = koi_beam_search_decode(
                         logits_tbc,
                         beam_width=args.beam_width,
-                        beam_cut=args.koi_beam_cut,
-                        scale=args.koi_scale,
-                        offset=args.koi_offset,
-                        blank_score=args.koi_blank_score,
-                        reverse=args.koi_reverse,
+                        beam_cut=100.0,
+                        scale=1.0,
+                        offset=0.0,
+                        blank_score=2.0,
+                        reverse=False,
                         input_lengths=input_lengths,
                     )
                 for ids in pred_ids:

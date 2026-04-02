@@ -272,7 +272,7 @@ basecall-eval \
 - `--model_name_or_path`: HuggingFace model ID or local path.
 - `--ckpt`: checkpoint path.
 - `--beam_width`: beam width for ont-koi `beam_search`.
-- `--koi_beam_cut`, `--koi_scale`, `--koi_offset`, `--koi_blank_score`, `--koi_reverse`: parameters for the Koi `beam_search` decoder.
+- Koi decoder advanced parameters in eval are fixed internally (`beam_cut=100`, `scale=1`, `offset=0`, `blank_score=2`, `reverse=False`) to simplify CLI usage.
 - `--ctc_crf_blank_score`: blank score used by CTC-CRF head logits (should match training setting).
 - `--decoder`: choose `auto`, `ctc_viterbi`, `koi`, or `ctc_crf` for prediction/metrics (`auto`: CTC->`ctc_viterbi`, CTC-CRF->`ctc_crf`).
 - `--head_type`: optional override for checkpoint head type (`ctc` or `ctc_crf`, default auto-infer).
@@ -286,7 +286,7 @@ basecall-eval \
 - `--fastq_q`: fixed Phred quality value for FASTQ output (default: 20).
 - `--hidden_layer`: which backbone hidden state to use when `--feature_source hidden` (default: -1).
 - `--feature_source`/`--feature-source`: choose `hidden` (default) or `embedding` for model features before pre-head/head.
-- `--pre_head_type`, `--pre_head_transformer_nhead`: optional pre-head module settings (must match training).
+- `--pre_head_type`, `--pre_head_transformer_nhead`: pre-head settings; `--pre_head_type` defaults to `auto` and infers from checkpoint (`none`/`bilstm`/`transformer`/`tcn`), but you can override manually.
 - `--recursive`: scan subfolders for `.jsonl.gz` or tokens/reference `.npy`.
 - Eval startup prints a model summary (`pre_head`, `head`, parameter counts) and full module structure for quick sanity-checking.
 
@@ -311,12 +311,8 @@ basecall-infer \
 
 ### Decoder parameters (ont-koi `beam_search`)
 
-- `--koi_beam_cut`: beam cut value (default: 100.0).
-- `--koi_scale`: scale applied to scores (default: 1.0).
-- `--koi_offset`: offset applied to scores (default: 0.0).
-- `--koi_blank_score`: blank score used by Koi decoder (default: 2.0).
 - `--ctc_crf_blank_score`: blank score used by CTC-CRF head logits (default: 2.0; keep consistent with training).
-- `--koi_reverse`: reverse output sequence (useful for reverse-complemented models).
+- Koi decoder advanced parameters in inference are fixed internally (`beam_cut=100`, `scale=1`, `offset=0`, `blank_score=2`, `reverse=False`) to simplify CLI usage.
 - `--decoder`: choose `auto`, `ctc_viterbi`, `koi`, or `ctc_crf` for prediction (`auto`: CTC->`ctc_viterbi`, CTC-CRF->`ctc_crf`); CTC-CRF forces fp32 decoding.
 - `--head_type`: optional override for checkpoint head type (`ctc` or `ctc_crf`, default auto-infer).
 
@@ -338,13 +334,13 @@ basecall-infer \
 - `--batch_size`: number of reads per inference batch.
 - `--hidden_layer`: which backbone hidden state to use when `--feature_source hidden` (default: -1).
 - `--feature_source`/`--feature-source`: choose `hidden` (default) or `embedding` for model features before pre-head/head.
-- `--pre_head_type`, `--pre_head_transformer_nhead`: optional pre-head module settings (must match training).
+- `--pre_head_type`, `--pre_head_transformer_nhead`: pre-head settings; `--pre_head_type` defaults to `auto` and infers from checkpoint (`none`/`bilstm`/`transformer`/`tcn`), but you can override manually.
 - Inference startup prints a model summary (`pre_head`, `head`, parameter counts) and full module structure for quick sanity-checking.
 
 **Decoding**
 - `--beam_width`: beam search width.
 - `--beam_q`: fixed Q score for output FASTQ.
-- `--koi_beam_cut`, `--koi_scale`, `--koi_offset`, `--koi_blank_score`, `--koi_reverse`: Koi beam-search parameters.
+- Koi decoder advanced parameters are fixed internally (`beam_cut=100`, `scale=1`, `offset=0`, `blank_score=2`, `reverse=False`).
 
 **Chunking**
 - Long `text` fields are split into token chunks, decoded independently, then concatenated.
