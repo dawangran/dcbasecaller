@@ -14,7 +14,7 @@ from typing import Dict
 
 import torch
 
-from .utils import infer_head_config_from_state_dict
+from .utils import infer_head_config_from_state_dict, infer_pre_head_type_from_state_dict
 
 
 def load_checkpoint_state(path: str) -> Dict[str, torch.Tensor]:
@@ -28,6 +28,17 @@ def load_checkpoint_state(path: str) -> Dict[str, torch.Tensor]:
     raise ValueError(f"Unsupported checkpoint format: {path}")
 
 
+def summarize_model_structure_from_state_dict(sd: Dict[str, torch.Tensor]) -> Dict[str, object]:
+    total_params = int(sum(v.numel() for v in sd.values() if torch.is_tensor(v)))
+    return {
+        "pre_head_type_inferred": infer_pre_head_type_from_state_dict(sd),
+        "contains_backbone": any(k.startswith("backbone.") for k in sd),
+        "contains_pre_head": any(k.startswith("pre_head.") for k in sd),
+        "contains_base_head": any(k.startswith("base_head.") for k in sd),
+        "total_parameters_in_checkpoint": total_params,
+    }
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--ckpt", required=True)
@@ -35,8 +46,11 @@ def main() -> None:
 
     sd = load_checkpoint_state(args.ckpt)
     head_config = infer_head_config_from_state_dict(sd)
+    structure = summarize_model_structure_from_state_dict(sd)
     summary = {
         "num_classes": head_config["num_classes"],
+        "head_type": head_config.get("head_type"),
+        "model_structure": structure,
     }
     print(json.dumps(summary, indent=2))
 

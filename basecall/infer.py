@@ -19,8 +19,26 @@ from tqdm import tqdm
 
 from .ctc_crf import decode as ctc_crf_decode
 from .model import BasecallModel
-from .utils import ID2BASE, BLANK_IDX, seed_everything, resolve_input_lengths, infer_head_config_from_state_dict
+from .utils import (
+    ID2BASE,
+    BLANK_IDX,
+    seed_everything,
+    resolve_input_lengths,
+    infer_head_config_from_state_dict,
+    infer_pre_head_type_from_state_dict,
+)
 from .metrics import ctc_viterbi_decode, koi_beam_search_decode
+
+
+def _print_model_structure(model: torch.nn.Module, *, prefix: str = "[Model]") -> None:
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"{prefix} class={model.__class__.__name__}")
+    print(f"{prefix} pre_head={model.pre_head.__class__.__name__} head={model.base_head.__class__.__name__}")
+    print(f"{prefix} params total={total_params:,} trainable={trainable_params:,}")
+    print(f"{prefix} structure:")
+    print(model)
+
 
 def _phred_to_char(q: int) -> str:
     # standard Sanger FASTQ (Phred+33)
@@ -214,8 +232,8 @@ def main():
                     help="Optional activation applied to head output logits.")
     ap.add_argument("--head_output_scale", type=float, default=None,
                     help="Optional scalar applied to head output logits (after activation).")
-    ap.add_argument("--pre_head_type", choices=["none", "bilstm", "transformer"], default="none",
-                    help="Optional module before CTC-CRF head.")
+    ap.add_argument("--pre_head_type", choices=["auto", "none", "bilstm", "transformer", "tcn"], default="auto",
+                    help="Optional module before CTC-CRF head. Use 'auto' to infer from checkpoint.")
     ap.add_argument("--pre_head_transformer_nhead", type=int, default=8,
                     help="Attention heads for --pre_head_type transformer.")
     args = ap.parse_args()
@@ -238,6 +256,14 @@ def main():
         sd = state
     head_config = infer_head_config_from_state_dict(sd)
     head_type = args.head_type or head_config.get("head_type", "ctc")
+    inferred_pre_head_type = infer_pre_head_type_from_state_dict(sd)
+    pre_head_type = inferred_pre_head_type if args.pre_head_type == "auto" else args.pre_head_type
+    if args.pre_head_type != "auto" and inferred_pre_head_type in {"none", "bilstm", "transformer", "tcn"} and args.pre_head_type != inferred_pre_head_type:
+        print(
+            "[Warning] --pre_head_type does not match checkpoint-inferred pre_head_type: "
+            f"cli={args.pre_head_type}, ckpt={inferred_pre_head_type}. "
+            "This may cause partially loaded weights or architecture mismatch."
+        )
     # load model
     n_base = len(ID2BASE) - 1
     state_len = args.ctc_crf_state_len
@@ -265,7 +291,7 @@ def main():
         feature_source=args.feature_source,
         head_output_activation=args.head_output_activation,
         head_output_scale=args.head_output_scale,
-        pre_head_type=args.pre_head_type,
+        pre_head_type=pre_head_type,
         pre_head_transformer_nhead=args.pre_head_transformer_nhead,
         head_type=head_type,
         head_crf_blank_score=float(args.ctc_crf_blank_score),
@@ -275,6 +301,7 @@ def main():
     ).to(device)
     model.load_state_dict(sd, strict=False)
     model.eval()
+    _print_model_structure(model)
 
     tokenizer = model.tokenizer  # 你的 BasecallModel 里应有
 
