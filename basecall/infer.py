@@ -241,11 +241,17 @@ def main():
     else:
         sd = state
     head_config = infer_head_config_from_state_dict(sd)
+    inferred_pre_head_type = infer_pre_head_type_from_state_dict(sd)
     head_type = args.head_type or head_config.get("head_type", "ctc")
     pre_head_type = args.pre_head_type
     if pre_head_type == "auto":
-        pre_head_type = infer_pre_head_type_from_state_dict(sd)
+        pre_head_type = inferred_pre_head_type
         print(f"[Model] pre_head_type auto -> {pre_head_type}")
+    elif pre_head_type != inferred_pre_head_type:
+        print(
+            "[Model][Warning] --pre_head_type overrides checkpoint inference: "
+            f"arg={pre_head_type}, inferred={inferred_pre_head_type}"
+        )
     # load model
     n_base = len(ID2BASE) - 1
     state_len = args.ctc_crf_state_len
@@ -253,8 +259,10 @@ def main():
     if decoder_mode == "auto":
         decoder_mode = "ctc_viterbi" if head_type == "ctc" else "ctc_crf"
 
-    if head_type == "ctc" and decoder_mode not in {"ctc_viterbi"}:
-        raise ValueError("CTC head supports only --decoder ctc_viterbi (or auto).")
+    if head_type == "ctc" and decoder_mode not in {"ctc_viterbi", "koi"}:
+        raise ValueError("CTC head supports --decoder ctc_viterbi, koi, or auto.")
+    if head_type == "ctc_crf" and decoder_mode not in {"ctc_crf", "koi"}:
+        raise ValueError("CTC-CRF head supports --decoder ctc_crf, koi, or auto.")
     if decoder_mode == "ctc_crf":
         if head_type != "ctc_crf":
             raise ValueError("--decoder ctc_crf requires checkpoint/model head_type=ctc_crf.")
@@ -325,7 +333,7 @@ def main():
                         beam_cut=100.0,
                         scale=1.0,
                         offset=0.0,
-                        blank_score=2.0,
+                        blank_score=float(args.ctc_crf_blank_score),
                         reverse=False,
                         input_lengths=input_lengths,
                     )
