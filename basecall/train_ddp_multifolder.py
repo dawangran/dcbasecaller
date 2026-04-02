@@ -683,9 +683,9 @@ def parse_args():
                    help="Optional scalar applied to head output logits (after activation).")
     p.add_argument("--head_type", choices=["ctc", "ctc_crf"], default="ctc_crf",
                    help="Head type: plain CTC linear head or CTC-CRF head.")
-    p.add_argument("--pre_head_type", choices=["none", "bilstm", "transformer"], default="none",
+    p.add_argument("--pre_head_type", choices=["none", "bilstm", "transformer", "tcn"], default="none",
                    help="Optional module before CTC-CRF head.")
-    p.add_argument("--pre_ctc_module", dest="pre_head_type", choices=["none", "bilstm", "transformer"],
+    p.add_argument("--pre_ctc_module", dest="pre_head_type", choices=["none", "bilstm", "transformer", "tcn"],
                    help="Alias of --pre_head_type for selecting module before CTC/CTC-CRF head.")
     p.add_argument("--pre_head_transformer_nhead", type=int, default=8,
                    help="Attention heads for --pre_head_type transformer.")
