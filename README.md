@@ -311,12 +311,8 @@ basecall-infer \
 
 ### Decoder parameters (ont-koi `beam_search`)
 
-- `--koi_beam_cut`: beam cut value (default: 100.0).
-- `--koi_scale`: scale applied to scores (default: 1.0).
-- `--koi_offset`: offset applied to scores (default: 0.0).
-- `--koi_blank_score`: blank score used by Koi decoder (default: 2.0).
 - `--ctc_crf_blank_score`: blank score used by CTC-CRF head logits (default: 2.0; keep consistent with training).
-- `--koi_reverse`: reverse output sequence (useful for reverse-complemented models).
+- Koi decoder advanced parameters in inference are fixed internally (`beam_cut=100`, `scale=1`, `offset=0`, `blank_score=2`, `reverse=False`) to simplify CLI usage.
 - `--decoder`: choose `auto`, `ctc_viterbi`, `koi`, or `ctc_crf` for prediction (`auto`: CTC->`ctc_viterbi`, CTC-CRF->`ctc_crf`); CTC-CRF forces fp32 decoding.
 - `--head_type`: optional override for checkpoint head type (`ctc` or `ctc_crf`, default auto-infer).
 
@@ -344,7 +340,7 @@ basecall-infer \
 **Decoding**
 - `--beam_width`: beam search width.
 - `--beam_q`: fixed Q score for output FASTQ.
-- `--koi_beam_cut`, `--koi_scale`, `--koi_offset`, `--koi_blank_score`, `--koi_reverse`: Koi beam-search parameters.
+- Koi decoder advanced parameters are fixed internally (`beam_cut=100`, `scale=1`, `offset=0`, `blank_score=2`, `reverse=False`).
 
 **Chunking**
 - Long `text` fields are split into token chunks, decoded independently, then concatenated.
