@@ -158,13 +158,34 @@ basecall-train \
 - `--split_seed`: random seed for auto split.
 
 **Model & freezing**
-- `--model_name_or_path`: HuggingFace model ID or local path.
+- `--model_name_or_path`: for `--feature_source hidden|embedding`, this is the backbone HuggingFace model ID/local path; for `--feature_source vq_embedding`, this is the VQ tokenize model checkpoint path (used by `poregpt.tokenizers.VQETokenizer`).
 - `--hidden-layer`: which hidden layer to use when `--feature_source hidden` (`-1` = last, `-2` = second last).
-- `--feature_source`/`--feature-source`: choose `hidden` (default) or `embedding` (`self.backbone.get_input_embeddings()`).
+- `--feature_source`/`--feature-source`: choose `hidden` (default), `embedding` (`self.backbone.get_input_embeddings()`), or `vq_embedding` (tokenize-model codebook embedding; skips backbone forward).
+- `--vq_device`: device used to load VQ tokenizer/codebook in `vq_embedding` mode.
+- `--vq_token_batch_size`: token batch size passed to `VQETokenizer` in `vq_embedding` mode.
 - `--freeze_backbone`: freeze backbone, train head only.
 - `--reset_backbone_weights`: reinitialize backbone weights for ablation.
 - `--unfreeze_last_n_layers`: unfreeze last N transformer layers.
 - `--unfreeze_layer_start`, `--unfreeze_layer_end`: unfreeze layers in range `[start, end)`.
+
+### Train with tokenize model codebook embeddings (`vq_embedding`)
+
+Use this when `text/signal_str` carries token ids like `<|bwav:123|><|bwav:456|>...` (also supports JSON list string like `[123,456]` and CSV like `123,456`).
+
+```bash
+basecall-train \
+  --jsonl_paths /path/to/reads.jsonl.gz \
+  --model_name_or_path /path/to/tokenize_model_ckpt \
+  --feature_source vq_embedding \
+  --vq_device cuda \
+  --vq_token_batch_size 100 \
+  --output_dir outputs_vq
+```
+
+Notes:
+- In `vq_embedding` mode, the dataloader uses a dedicated collate path that parses token ids from `signal_str`.
+- If token ids cannot be parsed from a record, training raises a clear `ValueError` with bad indices/examples.
+- `poregpt` must be installed in the runtime environment for `vq_embedding`.
 
 **Head options**
 - `--head_output_activation`: optional activation for head logits (e.g. `tanh` for Bonito-style scaling).

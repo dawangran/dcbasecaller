@@ -25,6 +25,7 @@ import os
 import glob
 import gzip
 import json
+import re
 from dataclasses import dataclass
 from typing import List, Dict, Any, Tuple
 
@@ -447,4 +448,85 @@ def create_collate_fn(tokenizer: PreTrainedTokenizerBase):
             "target_lengths": target_lengths,
             "target_seqs": target_seqs,
         }
+    return fn
+
+
+_BWAV_ID_PATTERN = re.compile(r"<\|bwav:(\d+)\|>", flags=re.IGNORECASE)
+
+
+def _parse_signal_to_token_ids(signal_str: str) -> List[int]:
+    if not signal_str:
+        return []
+    text = str(signal_str).strip()
+    if not text:
+        return []
+
+    bwav_ids = [int(x) for x in _BWAV_ID_PATTERN.findall(text)]
+    if bwav_ids:
+        return bwav_ids
+
+    if text.startswith("[") and text.endswith("]"):
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, list):
+                return [int(x) for x in parsed]
+        except json.JSONDecodeError:
+            pass
+
+    if "," in text:
+        out: List[int] = []
+        for part in text.split(","):
+            s = part.strip()
+            if not s:
+                continue
+            out.append(int(s))
+        return out
+
+    if text.isdigit():
+        return [int(text)]
+    return []
+
+
+def create_vq_collate_fn():
+    """
+    Collate for VQ tokenize-model embedding mode.
+    signal_str should contain repeated <|bwav:ID|> tokens.
+    """
+
+    def fn(batch: List[Dict[str, Any]]):
+        signal_strs = [b["signal_str"] for b in batch]
+        target_seqs = [b["target_seq"] for b in batch]
+        id_seqs = [_parse_signal_to_token_ids(s) for s in signal_strs]
+        bad_indices = [i for i, seq in enumerate(id_seqs) if len(seq) == 0]
+        if bad_indices:
+            show = bad_indices[:5]
+            examples = [signal_strs[i][:120] for i in show]
+            raise ValueError(
+                "create_vq_collate_fn could not parse token ids from signal_str. "
+                f"bad_indices={show} examples={examples} (expected '<|bwav:ID|>...' or '[1,2,...]' or '1,2,...')."
+            )
+
+        max_len = max((len(x) for x in id_seqs), default=0)
+        input_ids = torch.zeros((len(id_seqs), max_len), dtype=torch.long)
+        attention_mask = torch.zeros((len(id_seqs), max_len), dtype=torch.long)
+        for i, ids in enumerate(id_seqs):
+            if not ids:
+                continue
+            cur = torch.tensor(ids, dtype=torch.long)
+            input_ids[i, : len(ids)] = cur
+            attention_mask[i, : len(ids)] = 1
+
+        input_lengths = resolve_input_lengths(input_ids, attention_mask=attention_mask)
+        target_lengths = torch.tensor([len(x) for x in target_seqs], dtype=torch.long)
+        target_labels = torch.cat([torch.tensor(x, dtype=torch.long) for x in target_seqs]) if target_seqs else torch.empty(0, dtype=torch.long)
+
+        return {
+            "input_ids": input_ids,
+            "input_lengths": input_lengths,
+            "attention_mask": attention_mask,
+            "target_labels": target_labels,
+            "target_lengths": target_lengths,
+            "target_seqs": target_seqs,
+        }
+
     return fn

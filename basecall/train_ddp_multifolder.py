@@ -58,6 +58,7 @@ from .data_multifolder import (
     split_indices,
     MultiNpySignalRefDataset,
     create_collate_fn,
+    create_vq_collate_fn,
 )
 from .callback import plot_alignment_heatmap
 
@@ -607,12 +608,17 @@ def parse_args():
     p.add_argument("--test_ratio", type=float, default=0.1)
     p.add_argument("--split_seed", type=int, default=42)
 
-    p.add_argument("--model_name_or_path", type=str, required=True)
+    p.add_argument("--model_name_or_path", type=str, required=True,
+                   help="Backbone model path for hidden/embedding; VQ tokenizer checkpoint path for vq_embedding.")
     p.add_argument("--hidden-layer",type=int,default=-1, help="Which backbone hidden layer to use when --feature_source hidden (-1=last, -2=second last, etc.)")
     p.add_argument("--learnable_fuse_last_n_layers", type=int, default=0,
                    help="If >0, learn a softmax-weighted fusion over the last N hidden layers (overrides --hidden-layer).")
-    p.add_argument("--feature_source", "--feature-source", choices=["hidden", "embedding"], default="hidden",
-                   help="Use transformer hidden states or input embeddings as head input features.")
+    p.add_argument("--feature_source", "--feature-source", choices=["hidden", "embedding", "vq_embedding"], default="hidden",
+                   help="Use backbone hidden states / backbone input embedding / tokenize-model VQ codebook embedding.")
+    p.add_argument("--vq_device", type=str, default="cuda",
+                   help="Device used when loading VQETokenizer for --feature_source vq_embedding.")
+    p.add_argument("--vq_token_batch_size", type=int, default=100,
+                   help="token_batch_size used when loading VQETokenizer for --feature_source vq_embedding.")
 
 
     p.add_argument("--pretrained_ckpt", type=str, default=None,
@@ -788,6 +794,8 @@ def main():
         hidden_layer=args.hidden_layer,
         learnable_fuse_last_n_layers=args.learnable_fuse_last_n_layers,
         feature_source=args.feature_source,
+        vq_device=args.vq_device,
+        vq_token_batch_size=args.vq_token_batch_size,
         freeze_backbone=bool(args.freeze_backbone),
         reset_backbone_weights=bool(args.reset_backbone_weights),
         unfreeze_last_n_layers=args.unfreeze_last_n_layers,
@@ -911,7 +919,10 @@ def main():
             else:
                 logger.info(f"[Data] train_files={len(train_files)} val_files={len(val_files)} test_files={len(test_files)}")
 
-    collate_fn = create_collate_fn(tokenizer)
+    if args.feature_source == "vq_embedding":
+        collate_fn = create_vq_collate_fn()
+    else:
+        collate_fn = create_collate_fn(tokenizer)
 
     train_loader = DataLoader(
         train_dataset,
