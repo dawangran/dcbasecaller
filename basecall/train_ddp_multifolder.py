@@ -608,14 +608,13 @@ def parse_args():
     p.add_argument("--test_ratio", type=float, default=0.1)
     p.add_argument("--split_seed", type=int, default=42)
 
-    p.add_argument("--model_name_or_path", type=str, required=True)
+    p.add_argument("--model_name_or_path", type=str, required=True,
+                   help="Backbone model path for hidden/embedding; VQ tokenizer checkpoint path for vq_embedding.")
     p.add_argument("--hidden-layer",type=int,default=-1, help="Which backbone hidden layer to use when --feature_source hidden (-1=last, -2=second last, etc.)")
     p.add_argument("--learnable_fuse_last_n_layers", type=int, default=0,
                    help="If >0, learn a softmax-weighted fusion over the last N hidden layers (overrides --hidden-layer).")
     p.add_argument("--feature_source", "--feature-source", choices=["hidden", "embedding", "vq_embedding"], default="hidden",
                    help="Use backbone hidden states / backbone input embedding / tokenize-model VQ codebook embedding.")
-    p.add_argument("--vq_model_ckpt", type=str, default=None,
-                   help="Required when --feature_source vq_embedding. Path to VQETokenizer checkpoint.")
     p.add_argument("--vq_device", type=str, default="cuda",
                    help="Device used when loading VQETokenizer for --feature_source vq_embedding.")
     p.add_argument("--vq_token_batch_size", type=int, default=100,
@@ -795,7 +794,6 @@ def main():
         hidden_layer=args.hidden_layer,
         learnable_fuse_last_n_layers=args.learnable_fuse_last_n_layers,
         feature_source=args.feature_source,
-        vq_model_ckpt=args.vq_model_ckpt,
         vq_device=args.vq_device,
         vq_token_batch_size=args.vq_token_batch_size,
         freeze_backbone=bool(args.freeze_backbone),

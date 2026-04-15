@@ -225,7 +225,6 @@ class BasecallModel(nn.Module):
         hidden_layer: int = -1,          # 选哪一层 hidden_states
         learnable_fuse_last_n_layers: int = 0,  # 0=关闭；>0 时对最后 N 层做 softmax 可学习加权融合
         feature_source: str = "hidden",   # hidden | embedding
-        vq_model_ckpt: str | None = None,
         vq_device: str = "cuda",
         vq_token_batch_size: int = 100,
         freeze_backbone: bool = False,   # ✅ 新增：是否冻结基座（默认不冻结，保持你原行为）
@@ -263,8 +262,6 @@ class BasecallModel(nn.Module):
         if self.learnable_fuse_last_n_layers > 0:
             self.layer_fuse_logits = nn.Parameter(torch.zeros(self.learnable_fuse_last_n_layers))
         if self.feature_source == "vq_embedding":
-            if not vq_model_ckpt:
-                raise ValueError("--vq_model_ckpt is required when feature_source='vq_embedding'.")
             try:
                 from poregpt.tokenizers import VQETokenizer
             except ModuleNotFoundError as exc:
@@ -273,7 +270,7 @@ class BasecallModel(nn.Module):
                 ) from exc
 
             vq_tokenizer = VQETokenizer(
-                model_ckpt=vq_model_ckpt,
+                model_ckpt=model_path,
                 device=vq_device,
                 token_batch_size=vq_token_batch_size,
             )
