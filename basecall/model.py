@@ -265,7 +265,12 @@ class BasecallModel(nn.Module):
         if self.feature_source == "vq_embedding":
             if not vq_model_ckpt:
                 raise ValueError("--vq_model_ckpt is required when feature_source='vq_embedding'.")
-            from poregpt.tokenizers import VQETokenizer
+            try:
+                from poregpt.tokenizers import VQETokenizer
+            except ModuleNotFoundError as exc:
+                raise ModuleNotFoundError(
+                    "feature_source='vq_embedding' requires `poregpt` to be installed in the runtime environment."
+                ) from exc
 
             vq_tokenizer = VQETokenizer(
                 model_ckpt=vq_model_ckpt,
