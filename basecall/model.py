@@ -225,6 +225,9 @@ class BasecallModel(nn.Module):
         hidden_layer: int = -1,          # 选哪一层 hidden_states
         learnable_fuse_last_n_layers: int = 0,  # 0=关闭；>0 时对最后 N 层做 softmax 可学习加权融合
         feature_source: str = "hidden",   # hidden | embedding
+        vq_model_ckpt: str | None = None,
+        vq_device: str = "cuda",
+        vq_token_batch_size: int = 100,
         freeze_backbone: bool = False,   # ✅ 新增：是否冻结基座（默认不冻结，保持你原行为）
         reset_backbone_weights: bool = False,  # ✅ 可选：重置基座权重用于消融
         unfreeze_last_n_layers: int = 0,  # 可选：仅解冻最后 N 层（其余保持冻结）
@@ -248,73 +251,91 @@ class BasecallModel(nn.Module):
         self.unfreeze_last_n_layers = max(0, int(unfreeze_last_n_layers))
         self.unfreeze_layer_start = unfreeze_layer_start
         self.unfreeze_layer_end = unfreeze_layer_end
+        self.tokenizer = None
+        self.backbone = None
+        self.vq_embedding = None
 
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            model_path, trust_remote_code=True
-        )
-
-        if reset_backbone_weights:
-            backbone_config = AutoConfig.from_pretrained(
-                model_path,
-                trust_remote_code=True,
-            )
-            self.backbone = AutoModel.from_config(
-                backbone_config,
-                trust_remote_code=True,
-            )
-        else:
-            self.backbone = AutoModel.from_pretrained(
-                model_path,
-                trust_remote_code=True,
-            )
-
-        if self.feature_source not in {"hidden", "embedding"}:
-            raise ValueError(f"Unsupported feature_source: {self.feature_source}. Use 'hidden' or 'embedding'.")
+        if self.feature_source not in {"hidden", "embedding", "vq_embedding"}:
+            raise ValueError(f"Unsupported feature_source: {self.feature_source}. Use 'hidden', 'embedding' or 'vq_embedding'.")
         if self.feature_source != "hidden" and self.learnable_fuse_last_n_layers > 0:
             raise ValueError("learnable_fuse_last_n_layers requires feature_source='hidden'.")
         self.layer_fuse_logits: nn.Parameter | None = None
         if self.learnable_fuse_last_n_layers > 0:
             self.layer_fuse_logits = nn.Parameter(torch.zeros(self.learnable_fuse_last_n_layers))
+        if self.feature_source == "vq_embedding":
+            if not vq_model_ckpt:
+                raise ValueError("--vq_model_ckpt is required when feature_source='vq_embedding'.")
+            from poregpt.tokenizers import VQETokenizer
 
-        # 省显存：关闭 cache（很多 decoder-only 默认开）
-        if hasattr(self.backbone.config, "use_cache"):
-            self.backbone.config.use_cache = False
-
-        # ✅ 冻结基座（核心）
-        if self.freeze_backbone or self.unfreeze_last_n_layers > 0 or unfreeze_layer_start is not None or unfreeze_layer_end is not None:
-            for p in self.backbone.parameters():
-                p.requires_grad = False
-            if self.freeze_backbone and self.unfreeze_last_n_layers == 0:
-                self.backbone.eval()  # 固定 dropout 等推理行为（推荐）
-
-        # ✅ 可选：仅解冻最后 N 层
-        if self.unfreeze_last_n_layers > 0 or unfreeze_layer_start is not None or unfreeze_layer_end is not None:
-            layers = self._get_transformer_layers()
-            n_layers = len(layers)
-            if unfreeze_layer_start is not None or unfreeze_layer_end is not None:
-                start = 0 if unfreeze_layer_start is None else int(unfreeze_layer_start)
-                end = n_layers if unfreeze_layer_end is None else int(unfreeze_layer_end)
-                if start < 0:
-                    start = n_layers + start
-                if end < 0:
-                    end = n_layers + end
-                if not 0 <= start <= end <= n_layers:
-                    raise ValueError(f"Invalid unfreeze layer range: [{start}, {end}) with {n_layers} layers.")
-                target_layers = layers[start:end]
+            vq_tokenizer = VQETokenizer(
+                model_ckpt=vq_model_ckpt,
+                device=vq_device,
+                token_batch_size=vq_token_batch_size,
+            )
+            codebook = vq_tokenizer._get_codebook_embed()
+            if hasattr(codebook, "detach"):
+                codebook = codebook.detach().cpu()
+            codebook = torch.as_tensor(codebook, dtype=torch.float32)
+            self.vq_embedding = nn.Embedding.from_pretrained(codebook, freeze=True)
+            hidden_size = int(codebook.shape[1])
+        else:
+            self.tokenizer = AutoTokenizer.from_pretrained(
+                model_path, trust_remote_code=True
+            )
+            if reset_backbone_weights:
+                backbone_config = AutoConfig.from_pretrained(
+                    model_path,
+                    trust_remote_code=True,
+                )
+                self.backbone = AutoModel.from_config(
+                    backbone_config,
+                    trust_remote_code=True,
+                )
             else:
-                n_unfreeze = min(self.unfreeze_last_n_layers, n_layers)
-                target_layers = layers[-n_unfreeze:]
-            for layer in target_layers:
-                for p in layer.parameters():
-                    p.requires_grad = True
+                self.backbone = AutoModel.from_pretrained(
+                    model_path,
+                    trust_remote_code=True,
+                )
 
-        hidden_size = (
-            getattr(self.backbone.config, "hidden_size", None)
-            or getattr(self.backbone.config, "d_model", None)
-            or getattr(self.backbone.config, "n_embd", None)
-        )
-        if hidden_size is None:
-            raise ValueError("Cannot infer hidden_size from backbone config.")
+            # 省显存：关闭 cache（很多 decoder-only 默认开）
+            if hasattr(self.backbone.config, "use_cache"):
+                self.backbone.config.use_cache = False
+
+            # ✅ 冻结基座（核心）
+            if self.freeze_backbone or self.unfreeze_last_n_layers > 0 or unfreeze_layer_start is not None or unfreeze_layer_end is not None:
+                for p in self.backbone.parameters():
+                    p.requires_grad = False
+                if self.freeze_backbone and self.unfreeze_last_n_layers == 0:
+                    self.backbone.eval()  # 固定 dropout 等推理行为（推荐）
+
+            # ✅ 可选：仅解冻最后 N 层
+            if self.unfreeze_last_n_layers > 0 or unfreeze_layer_start is not None or unfreeze_layer_end is not None:
+                layers = self._get_transformer_layers()
+                n_layers = len(layers)
+                if unfreeze_layer_start is not None or unfreeze_layer_end is not None:
+                    start = 0 if unfreeze_layer_start is None else int(unfreeze_layer_start)
+                    end = n_layers if unfreeze_layer_end is None else int(unfreeze_layer_end)
+                    if start < 0:
+                        start = n_layers + start
+                    if end < 0:
+                        end = n_layers + end
+                    if not 0 <= start <= end <= n_layers:
+                        raise ValueError(f"Invalid unfreeze layer range: [{start}, {end}) with {n_layers} layers.")
+                    target_layers = layers[start:end]
+                else:
+                    n_unfreeze = min(self.unfreeze_last_n_layers, n_layers)
+                    target_layers = layers[-n_unfreeze:]
+                for layer in target_layers:
+                    for p in layer.parameters():
+                        p.requires_grad = True
+
+            hidden_size = (
+                getattr(self.backbone.config, "hidden_size", None)
+                or getattr(self.backbone.config, "d_model", None)
+                or getattr(self.backbone.config, "n_embd", None)
+            )
+            if hidden_size is None:
+                raise ValueError("Cannot infer hidden_size from backbone config.")
 
         if num_classes is None:
             num_classes = NUM_CLASSES
@@ -410,6 +431,7 @@ class BasecallModel(nn.Module):
             and self.unfreeze_last_n_layers == 0
             and self.unfreeze_layer_start is None
             and self.unfreeze_layer_end is None
+            and self.backbone is not None
         ):
             self.backbone.eval()
         return self
@@ -419,7 +441,9 @@ class BasecallModel(nn.Module):
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if self.feature_source == "embedding":
+        if self.feature_source == "vq_embedding":
+            hidden = self.vq_embedding(input_ids)
+        elif self.feature_source == "embedding":
             embedding_layer = self.backbone.get_input_embeddings()
             if embedding_layer is None:
                 raise ValueError("Backbone does not expose input embeddings via get_input_embeddings().")
