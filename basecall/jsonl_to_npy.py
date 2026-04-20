@@ -15,12 +15,14 @@ from __future__ import annotations
 import argparse
 import gzip
 import json
+import re
 from pathlib import Path
 from typing import Any, Iterable
 
 import numpy as np
 
 BASE2ID = {"A": 1, "C": 2, "G": 3, "T": 4}
+BWAV_TOKEN_RE = re.compile(r"<\|bwav:(\d+)\|>")
 
 
 def parse_args() -> argparse.Namespace:
@@ -30,6 +32,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--max_files", type=int, default=100, help="Read at most the first N files after sorting (default: 100).")
     p.add_argument("--files_per_shard", type=int, default=10, help="Merge every K jsonl files into one npy shard pair (default: 10).")
     p.add_argument("--ref_max_len", type=int, default=800, help="Pad/truncate reference labels to fixed length (default: 800).")
+    p.add_argument(
+        "--token_offset",
+        type=int,
+        default=0,
+        help="Add a fixed offset to each <|bwav:ID|> token in text (default: 0).",
+    )
     p.add_argument("--recursive", action="store_true", help="Recursively scan input_dir.")
     return p.parse_args()
 
@@ -94,6 +102,12 @@ def pad_or_truncate(values: list[int], max_len: int) -> np.ndarray:
     return out
 
 
+def apply_token_offset_to_signal_str(signal_str: str, token_offset: int) -> str:
+    if token_offset <= 0 or not signal_str:
+        return signal_str
+    return BWAV_TOKEN_RE.sub(lambda m: f"<|bwav:{int(m.group(1)) + token_offset}|>", signal_str)
+
+
 def main() -> None:
     args = parse_args()
     input_dir = Path(args.input_dir)
@@ -106,6 +120,8 @@ def main() -> None:
         raise ValueError("--files_per_shard must be > 0")
     if args.ref_max_len <= 0:
         raise ValueError("--ref_max_len must be > 0")
+    if args.token_offset < 0:
+        raise ValueError("--token_offset must be >= 0")
 
     all_files = iter_jsonl_paths(input_dir, recursive=bool(args.recursive))
     selected_files = all_files[: args.max_files]
@@ -131,7 +147,7 @@ def main() -> None:
                     skipped += 1
                     continue
                 labels = parse_bases(bases)
-                tokens.append(str(text))
+                tokens.append(apply_token_offset_to_signal_str(str(text), args.token_offset))
                 references.append(pad_or_truncate(labels, args.ref_max_len))
 
         tok_path = output_dir / f"tokens_{shard_idx:04d}.npy"

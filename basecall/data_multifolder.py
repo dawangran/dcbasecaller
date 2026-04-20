@@ -340,6 +340,15 @@ def _normalize_tokens(value: Any) -> str:
     return str(value)
 
 
+_BWAV_TOKEN_RE = re.compile(r"<\|bwav:(\d+)\|>")
+
+
+def _apply_token_offset_to_signal_str(signal_str: str, token_offset: int) -> str:
+    if token_offset <= 0 or not signal_str:
+        return signal_str
+    return _BWAV_TOKEN_RE.sub(lambda m: f"<|bwav:{int(m.group(1)) + token_offset}|>", signal_str)
+
+
 def _iter_jsonl_records(path: str):
     with gzip.open(path, "rt", encoding="utf-8") as f:
         for line in f:
@@ -354,8 +363,10 @@ class MultiJsonlSignalRefDataset(Dataset):
     从 jsonl.gz 读取 text/bases 字段，输出与原 data.py 一致的格式：
       {"signal_str": str, "target_seq": List[int]}
     """
-    def __init__(self, jsonl_files: List[JsonlFile]):
+    def __init__(self, jsonl_files: List[JsonlFile], token_offset: int = 0):
         super().__init__()
+        if token_offset < 0:
+            raise ValueError("token_offset must be >= 0")
         self.signal_list: List[str] = []
         self.target_list: List[np.ndarray] = []
 
@@ -366,7 +377,7 @@ class MultiJsonlSignalRefDataset(Dataset):
                 if not signal_str or bases is None:
                     continue
                 labels = _parse_bases(bases)
-                self.signal_list.append(str(signal_str))
+                self.signal_list.append(_apply_token_offset_to_signal_str(str(signal_str), token_offset))
                 self.target_list.append(np.asarray(labels))
 
         print(f"[Dataset] Loaded {len(self.signal_list)} reads from {len(jsonl_files)} jsonl files")
@@ -386,8 +397,10 @@ class MultiNpySignalRefDataset(Dataset):
     从 tokens_*.npy / reference_*.npy 读取，输出与原 data.py 一致的格式：
       {"signal_str": str, "target_seq": List[int]}
     """
-    def __init__(self, npy_pairs: List[NpyPair]):
+    def __init__(self, npy_pairs: List[NpyPair], token_offset: int = 0):
         super().__init__()
+        if token_offset < 0:
+            raise ValueError("token_offset must be >= 0")
         self.signal_list: List[str] = []
         self.target_list: List[np.ndarray] = []
 
@@ -404,7 +417,7 @@ class MultiNpySignalRefDataset(Dataset):
                 if not signal_str:
                     continue
                 labels = _parse_bases(ref_row)
-                self.signal_list.append(signal_str)
+                self.signal_list.append(_apply_token_offset_to_signal_str(signal_str, token_offset))
                 self.target_list.append(np.asarray(labels))
 
         print(f"[Dataset] Loaded {len(self.signal_list)} reads from {len(npy_pairs)} npy pairs")

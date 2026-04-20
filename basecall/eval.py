@@ -256,6 +256,8 @@ def main() -> None:
                     help="Comma-separated folders or tokens_*.npy/reference_*.npy files (uses token/reference pairs).")
     ap.add_argument("--recursive", action="store_true",
                     help="Scan subfolders for .jsonl.gz or tokens/reference .npy inputs.")
+    ap.add_argument("--token_offset", type=int, default=0,
+                    help="Add this offset to each <|bwav:ID|> token in input signal_str (e.g. 0->128).")
     ap.add_argument("--model_name_or_path", required=True)
     ap.add_argument("--ckpt", required=True)
     ap.add_argument("--beam_width", type=int, default=32)
@@ -289,6 +291,8 @@ def main() -> None:
     ap.add_argument("--acc_min_coverage", type=float, default=0.0,
                     help="Minimum reference coverage required to count a read for accuracy.")
     args = ap.parse_args()
+    if args.token_offset < 0:
+        raise ValueError("--token_offset must be >= 0")
 
     seed_everything(42)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -301,7 +305,7 @@ def main() -> None:
         npy_pairs = scan_npy_pairs(npy_paths, group_by="file", recursive=args.recursive)
         if not npy_pairs:
             raise ValueError(f"No tokens/reference npy files found under: {args.npy_paths}")
-        dataset = MultiNpySignalRefDataset(npy_pairs)
+        dataset = MultiNpySignalRefDataset(npy_pairs, token_offset=args.token_offset)
     else:
         if not args.jsonl_paths:
             raise ValueError("Provide --jsonl_paths or --npy_paths.")
@@ -309,7 +313,7 @@ def main() -> None:
         jsonl_files = scan_jsonl_files(jsonl_paths, group_by="file", recursive=args.recursive)
         if not jsonl_files:
             raise ValueError(f"No jsonl files found under: {args.jsonl_paths}")
-        dataset = MultiJsonlSignalRefDataset(jsonl_files)
+        dataset = MultiJsonlSignalRefDataset(jsonl_files, token_offset=args.token_offset)
 
     state_dict = load_checkpoint_state(args.ckpt)
     head_config = infer_head_config_from_state_dict(state_dict)

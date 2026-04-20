@@ -12,6 +12,7 @@ import math
 import json
 import os
 import gzip
+import re
 from typing import List, Tuple, Iterable
 
 import torch
@@ -85,6 +86,15 @@ def split_bwav_tokens(text: str) -> List[str]:
         tokens.append(text[start : end + 2])
         i = end + 2
     return tokens
+
+
+_BWAV_TOKEN_RE = re.compile(r"<\|bwav:(\d+)\|>")
+
+
+def apply_token_offset_to_signal_str(signal_str: str, token_offset: int) -> str:
+    if token_offset <= 0 or not signal_str:
+        return signal_str
+    return _BWAV_TOKEN_RE.sub(lambda m: f"<|bwav:{int(m.group(1)) + token_offset}|>", signal_str)
 
 
 def chunk_tokens(tokens: List[str], max_tokens: int, overlap: int) -> List[List[str]]:
@@ -222,7 +232,11 @@ def main():
                     help="Optional module before CTC-CRF head. Default auto-infers from checkpoint.")
     ap.add_argument("--pre_head_transformer_nhead", type=int, default=8,
                     help="Attention heads for --pre_head_type transformer.")
+    ap.add_argument("--token_offset", type=int, default=0,
+                    help="Add this offset to each <|bwav:ID|> token in input signal_str (e.g. 0->128).")
     args = ap.parse_args()
+    if args.token_offset < 0:
+        raise ValueError("--token_offset must be >= 0")
 
     seed_everything(42)
     device = torch.device(args.device)
@@ -296,6 +310,7 @@ def main():
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     with open(args.out, "w") as w:
         for read_id, signal_str in tqdm(iter_jsonl_reads(args.jsonl_gz), desc="jsonl->fastq"):
+            signal_str = apply_token_offset_to_signal_str(signal_str, args.token_offset)
             tokens = split_bwav_tokens(signal_str)
             if not tokens:
                 continue
