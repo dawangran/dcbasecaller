@@ -15,12 +15,14 @@ from __future__ import annotations
 import argparse
 import gzip
 import json
+import re
 from pathlib import Path
 from typing import Any, Iterable
 
 import numpy as np
 
 BASE2ID = {"A": 1, "C": 2, "G": 3, "T": 4}
+BWAV_TOKEN_RE = re.compile(r"<\|bwav:(\d+)\|>")
 
 
 def parse_args() -> argparse.Namespace:
@@ -34,7 +36,7 @@ def parse_args() -> argparse.Namespace:
         "--token_offset",
         type=int,
         default=0,
-        help="Add a fixed offset to every parsed token id before padding/truncation (default: 0).",
+        help="Add a fixed offset to each <|bwav:ID|> token in text (default: 0).",
     )
     p.add_argument("--recursive", action="store_true", help="Recursively scan input_dir.")
     return p.parse_args()
@@ -100,6 +102,12 @@ def pad_or_truncate(values: list[int], max_len: int) -> np.ndarray:
     return out
 
 
+def apply_token_offset_to_signal_str(signal_str: str, token_offset: int) -> str:
+    if token_offset <= 0 or not signal_str:
+        return signal_str
+    return BWAV_TOKEN_RE.sub(lambda m: f"<|bwav:{int(m.group(1)) + token_offset}|>", signal_str)
+
+
 def main() -> None:
     args = parse_args()
     input_dir = Path(args.input_dir)
@@ -139,9 +147,7 @@ def main() -> None:
                     skipped += 1
                     continue
                 labels = parse_bases(bases)
-                if args.token_offset:
-                    labels = [x + args.token_offset for x in labels]
-                tokens.append(str(text))
+                tokens.append(apply_token_offset_to_signal_str(str(text), args.token_offset))
                 references.append(pad_or_truncate(labels, args.ref_max_len))
 
         tok_path = output_dir / f"tokens_{shard_idx:04d}.npy"
