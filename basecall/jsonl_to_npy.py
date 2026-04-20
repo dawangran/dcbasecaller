@@ -30,6 +30,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--max_files", type=int, default=100, help="Read at most the first N files after sorting (default: 100).")
     p.add_argument("--files_per_shard", type=int, default=10, help="Merge every K jsonl files into one npy shard pair (default: 10).")
     p.add_argument("--ref_max_len", type=int, default=800, help="Pad/truncate reference labels to fixed length (default: 800).")
+    p.add_argument(
+        "--token_offset",
+        type=int,
+        default=0,
+        help="Add a fixed offset to every parsed token id before padding/truncation (default: 0).",
+    )
     p.add_argument("--recursive", action="store_true", help="Recursively scan input_dir.")
     return p.parse_args()
 
@@ -106,6 +112,8 @@ def main() -> None:
         raise ValueError("--files_per_shard must be > 0")
     if args.ref_max_len <= 0:
         raise ValueError("--ref_max_len must be > 0")
+    if args.token_offset < 0:
+        raise ValueError("--token_offset must be >= 0")
 
     all_files = iter_jsonl_paths(input_dir, recursive=bool(args.recursive))
     selected_files = all_files[: args.max_files]
@@ -131,6 +139,8 @@ def main() -> None:
                     skipped += 1
                     continue
                 labels = parse_bases(bases)
+                if args.token_offset:
+                    labels = [x + args.token_offset for x in labels]
                 tokens.append(str(text))
                 references.append(pad_or_truncate(labels, args.ref_max_len))
 
