@@ -602,6 +602,8 @@ def parse_args():
                    help="Auto split granularity: folder/file keeps groups together; record shuffles all reads across files before split.")
     p.add_argument("--recursive", action="store_true",
                    help="Scan subfolders for .jsonl.gz or tokens/reference .npy inputs.")
+    p.add_argument("--token_offset", type=int, default=0,
+                   help="Add this offset to each <|bwav:ID|> token in input signal_str (e.g. 0->128).")
 
     p.add_argument("--train_ratio", type=float, default=0.8)
     p.add_argument("--val_ratio", type=float, default=0.1)
@@ -732,6 +734,8 @@ def apply_quick_overrides(args) -> None:
 
 def main():
     args = parse_args()
+    if args.token_offset < 0:
+        raise ValueError("--token_offset must be >= 0")
     apply_quick_overrides(args)
     backend, backend_note = resolve_distributed_backend(args)
     ddp_kwargs = DistributedDataParallelKwargs(
@@ -839,16 +843,16 @@ def main():
             train_pairs = scan_npy_pairs(train_npy_paths, group_by=args.group_by if args.group_by != "record" else "file", recursive=args.recursive)
             val_pairs = scan_npy_pairs(val_npy_paths, group_by=args.group_by if args.group_by != "record" else "file", recursive=args.recursive) if val_npy_paths else []
             test_pairs = scan_npy_pairs(test_npy_paths, group_by=args.group_by if args.group_by != "record" else "file", recursive=args.recursive) if test_npy_paths else []
-            train_dataset = MultiNpySignalRefDataset(train_pairs)
-            val_dataset = MultiNpySignalRefDataset(val_pairs) if len(val_pairs) else None
-            test_dataset = MultiNpySignalRefDataset(test_pairs) if len(test_pairs) else None
+            train_dataset = MultiNpySignalRefDataset(train_pairs, token_offset=args.token_offset)
+            val_dataset = MultiNpySignalRefDataset(val_pairs, token_offset=args.token_offset) if len(val_pairs) else None
+            test_dataset = MultiNpySignalRefDataset(test_pairs, token_offset=args.token_offset) if len(test_pairs) else None
         else:
             if not args.npy_paths:
                 raise ValueError("Provide --npy_paths or explicit --train_npy_paths/--val_npy_paths/--test_npy_paths.")
             npy_paths = [x.strip() for x in args.npy_paths.split(",") if x.strip()]
             npy_pairs = scan_npy_pairs(npy_paths, group_by=args.group_by if args.group_by != "record" else "file", recursive=args.recursive)
             if args.group_by == "record":
-                all_dataset = MultiNpySignalRefDataset(npy_pairs)
+                all_dataset = MultiNpySignalRefDataset(npy_pairs, token_offset=args.token_offset)
                 train_idx, val_idx, test_idx = split_indices(
                     len(all_dataset),
                     train_ratio=args.train_ratio,
@@ -867,9 +871,9 @@ def main():
                     test_ratio=args.test_ratio,
                     seed=args.split_seed,
                 )
-                train_dataset = MultiNpySignalRefDataset(train_pairs)
-                val_dataset = MultiNpySignalRefDataset(val_pairs) if len(val_pairs) else None
-                test_dataset = MultiNpySignalRefDataset(test_pairs) if len(test_pairs) else None
+                train_dataset = MultiNpySignalRefDataset(train_pairs, token_offset=args.token_offset)
+                val_dataset = MultiNpySignalRefDataset(val_pairs, token_offset=args.token_offset) if len(val_pairs) else None
+                test_dataset = MultiNpySignalRefDataset(test_pairs, token_offset=args.token_offset) if len(test_pairs) else None
 
         if is_main_process(accelerator):
             if args.group_by == "record":
@@ -881,16 +885,16 @@ def main():
             train_files = scan_jsonl_files(train_jsonl_paths, group_by=args.group_by if args.group_by != "record" else "file", recursive=args.recursive)
             val_files = scan_jsonl_files(val_jsonl_paths, group_by=args.group_by if args.group_by != "record" else "file", recursive=args.recursive) if val_jsonl_paths else []
             test_files = scan_jsonl_files(test_jsonl_paths, group_by=args.group_by if args.group_by != "record" else "file", recursive=args.recursive) if test_jsonl_paths else []
-            train_dataset = MultiJsonlSignalRefDataset(train_files)
-            val_dataset = MultiJsonlSignalRefDataset(val_files) if len(val_files) else None
-            test_dataset = MultiJsonlSignalRefDataset(test_files) if len(test_files) else None
+            train_dataset = MultiJsonlSignalRefDataset(train_files, token_offset=args.token_offset)
+            val_dataset = MultiJsonlSignalRefDataset(val_files, token_offset=args.token_offset) if len(val_files) else None
+            test_dataset = MultiJsonlSignalRefDataset(test_files, token_offset=args.token_offset) if len(test_files) else None
         else:
             if not args.jsonl_paths:
                 raise ValueError("Provide --jsonl_paths or explicit --train_jsonl_paths/--val_jsonl_paths/--test_jsonl_paths.")
             jsonl_paths = [x.strip() for x in args.jsonl_paths.split(",") if x.strip()]
             jsonl_files = scan_jsonl_files(jsonl_paths, group_by=args.group_by if args.group_by != "record" else "file", recursive=args.recursive)
             if args.group_by == "record":
-                all_dataset = MultiJsonlSignalRefDataset(jsonl_files)
+                all_dataset = MultiJsonlSignalRefDataset(jsonl_files, token_offset=args.token_offset)
                 train_idx, val_idx, test_idx = split_indices(
                     len(all_dataset),
                     train_ratio=args.train_ratio,
@@ -909,9 +913,9 @@ def main():
                     test_ratio=args.test_ratio,
                     seed=args.split_seed,
                 )
-                train_dataset = MultiJsonlSignalRefDataset(train_files)
-                val_dataset = MultiJsonlSignalRefDataset(val_files) if len(val_files) else None
-                test_dataset = MultiJsonlSignalRefDataset(test_files) if len(test_files) else None
+                train_dataset = MultiJsonlSignalRefDataset(train_files, token_offset=args.token_offset)
+                val_dataset = MultiJsonlSignalRefDataset(val_files, token_offset=args.token_offset) if len(val_files) else None
+                test_dataset = MultiJsonlSignalRefDataset(test_files, token_offset=args.token_offset) if len(test_files) else None
 
         if is_main_process(accelerator):
             if args.group_by == "record":
