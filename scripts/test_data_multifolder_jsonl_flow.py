@@ -4,8 +4,8 @@
 一步一步测试 data_multifolder.py 如何把 JSONL 读成训练语料。
 
 用法：
-  python scripts/test_data_multifolder_jsonl_flow.py --jsonl /path/to/reads.jsonl.gz
-  python scripts/test_data_multifolder_jsonl_flow.py --jsonl /path/to/reads.jsonl
+  python scripts/test_data_multifolder_jsonl_flow.py --jsonl /path/to/reads.jsonl.gz --tokenizer_name_or_path /path/to/model_or_tokenizer
+  python scripts/test_data_multifolder_jsonl_flow.py --jsonl /path/to/reads.jsonl --tokenizer_name_or_path /path/to/model_or_tokenizer
 
 说明：
 - data_multifolder.scan_jsonl_files 只接受 .jsonl.gz；若输入 .jsonl，本脚本会先临时转成 .jsonl.gz。
@@ -15,7 +15,7 @@
   3) bases 解析
   4) MultiJsonlSignalRefDataset 构建
   5) __getitem__ 输出
-  6) create_collate_fn 打包 batch
+  6) 使用模型 tokenizer + create_collate_fn 打包 batch
 """
 
 from __future__ import annotations
@@ -25,9 +25,7 @@ import gzip
 import json
 import tempfile
 from pathlib import Path
-from typing import Any
-
-import torch
+from transformers import AutoTokenizer
 
 from basecall.data_multifolder import (
     MultiJsonlSignalRefDataset,
@@ -36,37 +34,6 @@ from basecall.data_multifolder import (
     create_collate_fn,
     scan_jsonl_files,
 )
-
-
-class DummyTokenizer:
-    """最小 tokenizer：把 <|bwav:ID|> 中的 ID 取出来做 input_ids。"""
-
-    def __call__(self, texts: list[str], return_tensors: str = "pt", padding: bool = True, truncation: bool = False) -> dict[str, Any]:
-        parsed: list[list[int]] = []
-        for text in texts:
-            ids: list[int] = []
-            i = 0
-            while i < len(text):
-                start = text.find("<|bwav:", i)
-                if start < 0:
-                    break
-                end = text.find("|>", start)
-                if end < 0:
-                    break
-                num = text[start + len("<|bwav:"): end]
-                if num.isdigit():
-                    ids.append(int(num))
-                i = end + 2
-            parsed.append(ids if ids else [0])
-
-        max_len = max(len(x) for x in parsed)
-        input_ids = torch.zeros((len(parsed), max_len), dtype=torch.long)
-        attention_mask = torch.zeros((len(parsed), max_len), dtype=torch.long)
-        for row, ids in enumerate(parsed):
-            n = len(ids)
-            input_ids[row, :n] = torch.tensor(ids, dtype=torch.long)
-            attention_mask[row, :n] = 1
-        return {"input_ids": input_ids, "attention_mask": attention_mask}
 
 
 def _ensure_jsonl_gz(path: Path) -> tuple[Path, tempfile.TemporaryDirectory[str] | None]:
@@ -86,6 +53,7 @@ def _ensure_jsonl_gz(path: Path) -> tuple[Path, tempfile.TemporaryDirectory[str]
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--jsonl", type=str, required=True, help="Path to input .jsonl or .jsonl.gz")
+    ap.add_argument("--tokenizer_name_or_path", type=str, required=True, help="Tokenizer path used by model input.")
     ap.add_argument("--token_offset", type=int, default=0, help="Optional token offset passed to dataset.")
     args = ap.parse_args()
 
@@ -121,8 +89,9 @@ def main() -> None:
         item = ds[i]
         print(f"  item[{i}] signal_str={item['signal_str'][:80]!r} target_seq={item['target_seq']}")
 
-    print("[step6] run create_collate_fn with DummyTokenizer ...")
-    collate = create_collate_fn(DummyTokenizer())
+    print("[step6] run create_collate_fn with model tokenizer ...")
+    tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_name_or_path, trust_remote_code=True)
+    collate = create_collate_fn(tokenizer)
     mini_batch = [ds[i] for i in range(min(2, len(ds)))]
     if not mini_batch:
         raise RuntimeError("Dataset is empty after filtering; need at least one valid record with text+bases.")
