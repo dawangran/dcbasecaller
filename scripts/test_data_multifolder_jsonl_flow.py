@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any
 
 import torch
+from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
 from basecall.data_multifolder import (
     MultiJsonlSignalRefDataset,
@@ -69,6 +70,16 @@ class DummyTokenizer:
         return {"input_ids": input_ids, "attention_mask": attention_mask}
 
 
+def _build_tokenizer(tokenizer_path: str | None, use_dummy_tokenizer: bool) -> PreTrainedTokenizerBase | DummyTokenizer:
+    if use_dummy_tokenizer:
+        print("[tokenizer] using DummyTokenizer (debug only, may differ from training/inference tokenize behavior).")
+        return DummyTokenizer()
+    if not tokenizer_path:
+        raise ValueError("Please provide --tokenizer_path to keep tokenize behavior consistent with data/train/eval logic.")
+    print(f"[tokenizer] loading AutoTokenizer from: {tokenizer_path}")
+    return AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
+
+
 def _ensure_jsonl_gz(path: Path) -> tuple[Path, tempfile.TemporaryDirectory[str] | None]:
     if path.suffixes[-2:] == [".jsonl", ".gz"] or path.name.endswith(".jsonl.gz"):
         return path, None
@@ -87,6 +98,8 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--jsonl", type=str, required=True, help="Path to input .jsonl or .jsonl.gz")
     ap.add_argument("--token_offset", type=int, default=0, help="Optional token offset passed to dataset.")
+    ap.add_argument("--tokenizer_path", type=str, default=None, help="Tokenizer path used by training/eval (recommended).")
+    ap.add_argument("--use_dummy_tokenizer", action="store_true", help="Use built-in DummyTokenizer for quick debug.")
     args = ap.parse_args()
 
     src = Path(args.jsonl)
@@ -121,8 +134,9 @@ def main() -> None:
         item = ds[i]
         print(f"  item[{i}] signal_str={item['signal_str'][:80]!r} target_seq={item['target_seq']}")
 
-    print("[step6] run create_collate_fn with DummyTokenizer ...")
-    collate = create_collate_fn(DummyTokenizer())
+    tokenizer = _build_tokenizer(args.tokenizer_path, args.use_dummy_tokenizer)
+    print("[step6] run create_collate_fn with selected tokenizer ...")
+    collate = create_collate_fn(tokenizer)
     mini_batch = [ds[i] for i in range(min(2, len(ds)))]
     if not mini_batch:
         raise RuntimeError("Dataset is empty after filtering; need at least one valid record with text+bases.")
