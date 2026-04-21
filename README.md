@@ -413,3 +413,71 @@ basecall-infer \
   --jsonl_gz reads.jsonl.gz \
   --out out.fastq
 ```
+
+## 7) FAQ: JSONL processing and extracting `hidden`
+
+### How JSONL is processed
+
+When using `--jsonl_paths` (train/eval) or `--jsonl_gz` (infer), records are parsed as JSON objects. The common fields are:
+
+- `text`: input token sequence (for example `<|bwav:123|><|bwav:456|>...`)
+- `bases`: reference labels for supervised training/eval
+
+Processing flow:
+
+1. discover `.jsonl.gz` files
+2. read line-by-line JSON records
+3. parse `text` as model input sequence (`signal_str`)
+4. parse `bases` into integer labels (`target_seq`)
+5. collate/pad into batch tensors for model forward + decode/loss
+
+### How to get hidden states
+
+Use:
+
+- `--feature_source hidden` (default)
+- `--hidden-layer -1` for last layer (`-2` for second last, etc.)
+
+Optional layer fusion:
+
+- `--learnable_fuse_last_n_layers N`
+
+If `N > 0`, the model computes a softmax-weighted sum of the last `N` hidden layers, and this takes precedence over `--hidden-layer`.
+
+### Example
+
+```bash
+# Training from jsonl and using the last hidden layer
+basecall-train \
+  --jsonl_paths /data/train \
+  --model_name_or_path <hf-model> \
+  --feature_source hidden \
+  --hidden-layer -1 \
+  --output_dir outputs
+
+# Evaluation from jsonl with learned fusion over the last 4 hidden layers
+basecall-eval \
+  --jsonl_paths /data/val \
+  --model_name_or_path <hf-model> \
+  --ckpt outputs/ckpt_best.pt \
+  --feature_source hidden \
+  --learnable_fuse_last_n_layers 4 \
+  --out_dir eval_out
+```
+
+### How `bases` contributes to EM (Exact Match)
+
+In evaluation, both prediction and reference are converted from id sequences to base strings (`A/C/G/T`), then compared read-by-read:
+
+1. decode predicted ids to `pred_seq`
+2. decode reference ids to `ref_seq`
+3. if `pred_seq == ref_seq`, that read counts as exact match (`EM += 1`)
+4. final `read_exact_match_rate = EM / number_of_reads`
+
+Toy example:
+
+- read1: pred=`ACGT`, ref=`ACGT` -> exact match
+- read2: pred=`ACGA`, ref=`ACGT` -> not exact match
+- read3: pred=`TTAA`, ref=`TTAA` -> exact match
+
+Then `EM = 2`, total reads `= 3`, so `read_exact_match_rate = 2/3 = 0.6667`.
