@@ -100,6 +100,8 @@ def main() -> None:
     ap.add_argument("--token_offset", type=int, default=0, help="Optional token offset passed to dataset.")
     ap.add_argument("--tokenizer_path", type=str, default=None, help="Tokenizer path used by training/eval (recommended).")
     ap.add_argument("--use_dummy_tokenizer", action="store_true", help="Use built-in DummyTokenizer for quick debug.")
+    ap.add_argument("--show_full_tensors", action="store_true", help="Print full tensors in step6 for deep inspection.")
+    ap.add_argument("--preview_tokens", type=int, default=16, help="How many tokens to preview per sample from input_ids (0 to disable).")
     args = ap.parse_args()
 
     src = Path(args.jsonl)
@@ -147,6 +149,14 @@ def main() -> None:
     print("  input_lengths:", batch["input_lengths"].tolist())
     print("  target_lengths:", batch["target_lengths"].tolist())
     print("  target_labels:", batch["target_labels"].tolist())
+    if args.preview_tokens > 0:
+        preview_n = min(args.preview_tokens, int(batch["input_ids"].shape[1]))
+        print(f"  preview input_ids[:, :{preview_n}]:", batch["input_ids"][:, :preview_n].tolist())
+        print(f"  preview attention_mask[:, :{preview_n}]:", batch["attention_mask"][:, :preview_n].tolist())
+    if args.show_full_tensors:
+        print("  full input_ids:\n", batch["input_ids"])
+        print("  full attention_mask:\n", batch["attention_mask"])
+        print("  full target_labels:\n", batch["target_labels"])
     print("\n[done] JSONL -> dataset -> batch pipeline looks good.")
 
     if tmp_holder is not None:
