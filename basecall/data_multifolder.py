@@ -26,12 +26,14 @@ import glob
 import gzip
 import json
 import re
+import hashlib
+from itertools import islice
 from dataclasses import dataclass
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Iterator, Literal
 
 import numpy as np
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, IterableDataset, get_worker_info
 from transformers import PreTrainedTokenizerBase
 
 from .utils import BASE2ID, resolve_input_lengths
@@ -382,6 +384,14 @@ class MultiJsonlSignalRefDataset(Dataset):
 
         print(f"[Dataset] Loaded {len(self.signal_list)} reads from {len(jsonl_files)} jsonl files")
 
+    @classmethod
+    def from_samples(cls, signal_list: List[str], target_list: List[np.ndarray]):
+        ds = cls.__new__(cls)
+        Dataset.__init__(ds)
+        ds.signal_list = signal_list
+        ds.target_list = target_list
+        return ds
+
     def __len__(self):
         return len(self.signal_list)
 
@@ -422,6 +432,14 @@ class MultiNpySignalRefDataset(Dataset):
 
         print(f"[Dataset] Loaded {len(self.signal_list)} reads from {len(npy_pairs)} npy pairs")
 
+    @classmethod
+    def from_samples(cls, signal_list: List[str], target_list: List[np.ndarray]):
+        ds = cls.__new__(cls)
+        Dataset.__init__(ds)
+        ds.signal_list = signal_list
+        ds.target_list = target_list
+        return ds
+
     def __len__(self):
         return len(self.signal_list)
 
@@ -430,6 +448,328 @@ class MultiNpySignalRefDataset(Dataset):
         ref_row = np.asarray(self.target_list[idx]).reshape(-1)
         labels = ref_row[ref_row > 0].astype(np.int64).tolist()
         return {"signal_str": signal_str, "target_seq": labels}
+
+
+def split_jsonl_records_per_file(
+    jsonl_files: List[JsonlFile],
+    train_ratio: float = 0.8,
+    val_ratio: float = 0.1,
+    test_ratio: float = 0.1,
+    seed: int = 42,
+    token_offset: int = 0,
+) -> Tuple[MultiJsonlSignalRefDataset, MultiJsonlSignalRefDataset | None, MultiJsonlSignalRefDataset | None]:
+    if abs((train_ratio + val_ratio + test_ratio) - 1.0) > 1e-6:
+        raise ValueError("train_ratio + val_ratio + test_ratio must sum to 1.0")
+    if token_offset < 0:
+        raise ValueError("token_offset must be >= 0")
+
+    train_signal: List[str] = []
+    train_target: List[np.ndarray] = []
+    val_signal: List[str] = []
+    val_target: List[np.ndarray] = []
+    test_signal: List[str] = []
+    test_target: List[np.ndarray] = []
+
+    for fi, jf in enumerate(jsonl_files):
+        rows: List[Tuple[str, np.ndarray]] = []
+        for obj in _iter_jsonl_records(jf.path):
+            signal_str = obj.get("text", "")
+            bases = obj.get("bases", None)
+            if not signal_str or bases is None:
+                continue
+            labels = _parse_bases(bases)
+            rows.append((_apply_token_offset_to_signal_str(str(signal_str), token_offset), np.asarray(labels)))
+
+        if not rows:
+            continue
+        idx_train, idx_val, idx_test = split_indices(
+            total_size=len(rows),
+            train_ratio=train_ratio,
+            val_ratio=val_ratio,
+            test_ratio=test_ratio,
+            seed=seed + fi,
+        )
+        for i in idx_train:
+            s, t = rows[i]
+            train_signal.append(s)
+            train_target.append(t)
+        for i in idx_val:
+            s, t = rows[i]
+            val_signal.append(s)
+            val_target.append(t)
+        for i in idx_test:
+            s, t = rows[i]
+            test_signal.append(s)
+            test_target.append(t)
+
+    train_ds = MultiJsonlSignalRefDataset.from_samples(train_signal, train_target)
+    val_ds = MultiJsonlSignalRefDataset.from_samples(val_signal, val_target) if val_signal else None
+    test_ds = MultiJsonlSignalRefDataset.from_samples(test_signal, test_target) if test_signal else None
+    return train_ds, val_ds, test_ds
+
+
+def split_npy_records_per_file(
+    npy_pairs: List[NpyPair],
+    train_ratio: float = 0.8,
+    val_ratio: float = 0.1,
+    test_ratio: float = 0.1,
+    seed: int = 42,
+    token_offset: int = 0,
+) -> Tuple[MultiNpySignalRefDataset, MultiNpySignalRefDataset | None, MultiNpySignalRefDataset | None]:
+    if abs((train_ratio + val_ratio + test_ratio) - 1.0) > 1e-6:
+        raise ValueError("train_ratio + val_ratio + test_ratio must sum to 1.0")
+    if token_offset < 0:
+        raise ValueError("token_offset must be >= 0")
+
+    train_signal: List[str] = []
+    train_target: List[np.ndarray] = []
+    val_signal: List[str] = []
+    val_target: List[np.ndarray] = []
+    test_signal: List[str] = []
+    test_target: List[np.ndarray] = []
+
+    for pi, pair in enumerate(npy_pairs):
+        tokens = _load_npy_records(pair.tokens_path)
+        references = _load_npy_records(pair.reference_path)
+        if len(tokens) != len(references):
+            raise ValueError(
+                f"Tokens/Reference length mismatch for {pair.tokens_path}: "
+                f"{len(tokens)} vs {len(references)}"
+            )
+
+        rows: List[Tuple[str, np.ndarray]] = []
+        for token_row, ref_row in zip(tokens, references):
+            signal_str = _normalize_tokens(token_row)
+            if not signal_str:
+                continue
+            labels = _parse_bases(ref_row)
+            rows.append((_apply_token_offset_to_signal_str(signal_str, token_offset), np.asarray(labels)))
+        if not rows:
+            continue
+
+        idx_train, idx_val, idx_test = split_indices(
+            total_size=len(rows),
+            train_ratio=train_ratio,
+            val_ratio=val_ratio,
+            test_ratio=test_ratio,
+            seed=seed + pi,
+        )
+        for i in idx_train:
+            s, t = rows[i]
+            train_signal.append(s)
+            train_target.append(t)
+        for i in idx_val:
+            s, t = rows[i]
+            val_signal.append(s)
+            val_target.append(t)
+        for i in idx_test:
+            s, t = rows[i]
+            test_signal.append(s)
+            test_target.append(t)
+
+    train_ds = MultiNpySignalRefDataset.from_samples(train_signal, train_target)
+    val_ds = MultiNpySignalRefDataset.from_samples(val_signal, val_target) if val_signal else None
+    test_ds = MultiNpySignalRefDataset.from_samples(test_signal, test_target) if test_signal else None
+    return train_ds, val_ds, test_ds
+
+
+SplitName = Literal["train", "val", "test"]
+
+
+def _bucket_by_hash(key: str, seed: int) -> float:
+    payload = f"{seed}|{key}".encode("utf-8")
+    digest = hashlib.blake2b(payload, digest_size=8).digest()
+    integer = int.from_bytes(digest, "big", signed=False)
+    return integer / float(2**64)
+
+
+def _match_split(
+    key: str,
+    split_name: SplitName,
+    train_ratio: float,
+    val_ratio: float,
+    test_ratio: float,
+    seed: int,
+) -> bool:
+    if abs((train_ratio + val_ratio + test_ratio) - 1.0) > 1e-6:
+        raise ValueError("train_ratio + val_ratio + test_ratio must sum to 1.0")
+    u = _bucket_by_hash(key, seed)
+    if split_name == "train":
+        return u < train_ratio
+    if split_name == "val":
+        return train_ratio <= u < (train_ratio + val_ratio)
+    return u >= (train_ratio + val_ratio)
+
+
+class StreamingJsonlSignalRefDataset(IterableDataset):
+    """
+    Streaming dataset for jsonl.gz to avoid loading all reads into memory.
+    - Uses deterministic hash split for record-level split modes.
+    - Supports per-worker file sharding and bounded shuffle buffer.
+    """
+
+    def __init__(
+        self,
+        jsonl_files: List[JsonlFile],
+        split_name: SplitName,
+        split_mode: str,
+        train_ratio: float,
+        val_ratio: float,
+        test_ratio: float,
+        seed: int = 42,
+        token_offset: int = 0,
+        shuffle_buffer_size: int = 0,
+    ):
+        super().__init__()
+        self.jsonl_files = list(jsonl_files)
+        self.split_name = split_name
+        self.split_mode = split_mode
+        self.train_ratio = train_ratio
+        self.val_ratio = val_ratio
+        self.test_ratio = test_ratio
+        self.seed = seed
+        self.token_offset = token_offset
+        self.shuffle_buffer_size = max(int(shuffle_buffer_size), 0)
+
+    def _include(self, file_path: str, record_index: int) -> bool:
+        if self.split_mode in ("folder", "file"):
+            return True
+        if self.split_mode == "record":
+            key = f"{file_path}::global::{record_index}"
+            return _match_split(key, self.split_name, self.train_ratio, self.val_ratio, self.test_ratio, self.seed)
+        if self.split_mode == "record_per_file":
+            key = f"{file_path}::local::{record_index}"
+            return _match_split(key, self.split_name, self.train_ratio, self.val_ratio, self.test_ratio, self.seed)
+        raise ValueError(f"Unsupported split_mode for streaming: {self.split_mode}")
+
+    def _iter_records(self) -> Iterator[Dict[str, Any]]:
+        worker = get_worker_info()
+        files = self.jsonl_files
+        if worker is not None:
+            files = list(islice(files, worker.id, None, worker.num_workers))
+
+        for jf in files:
+            idx = 0
+            for obj in _iter_jsonl_records(jf.path):
+                signal_str = obj.get("text", "")
+                bases = obj.get("bases", None)
+                if not signal_str or bases is None:
+                    idx += 1
+                    continue
+                if not self._include(jf.path, idx):
+                    idx += 1
+                    continue
+                labels = _parse_bases(bases)
+                yield {
+                    "signal_str": _apply_token_offset_to_signal_str(str(signal_str), self.token_offset),
+                    "target_seq": [x for x in np.asarray(labels).reshape(-1).tolist() if int(x) > 0],
+                }
+                idx += 1
+
+    def __iter__(self):
+        stream = self._iter_records()
+        if self.shuffle_buffer_size <= 1:
+            yield from stream
+            return
+
+        rng = np.random.default_rng(self.seed + (get_worker_info().id if get_worker_info() else 0))
+        buf: List[Dict[str, Any]] = []
+        for item in stream:
+            if len(buf) < self.shuffle_buffer_size:
+                buf.append(item)
+                continue
+            j = int(rng.integers(0, len(buf)))
+            out = buf[j]
+            buf[j] = item
+            yield out
+        while buf:
+            j = int(rng.integers(0, len(buf)))
+            yield buf.pop(j)
+
+
+class StreamingNpySignalRefDataset(IterableDataset):
+    """
+    Streaming dataset for tokens/reference npy pairs.
+    """
+
+    def __init__(
+        self,
+        npy_pairs: List[NpyPair],
+        split_name: SplitName,
+        split_mode: str,
+        train_ratio: float,
+        val_ratio: float,
+        test_ratio: float,
+        seed: int = 42,
+        token_offset: int = 0,
+        shuffle_buffer_size: int = 0,
+    ):
+        super().__init__()
+        self.npy_pairs = list(npy_pairs)
+        self.split_name = split_name
+        self.split_mode = split_mode
+        self.train_ratio = train_ratio
+        self.val_ratio = val_ratio
+        self.test_ratio = test_ratio
+        self.seed = seed
+        self.token_offset = token_offset
+        self.shuffle_buffer_size = max(int(shuffle_buffer_size), 0)
+
+    def _include(self, tokens_path: str, record_index: int) -> bool:
+        if self.split_mode in ("folder", "file"):
+            return True
+        if self.split_mode == "record":
+            key = f"{tokens_path}::global::{record_index}"
+            return _match_split(key, self.split_name, self.train_ratio, self.val_ratio, self.test_ratio, self.seed)
+        if self.split_mode == "record_per_file":
+            key = f"{tokens_path}::local::{record_index}"
+            return _match_split(key, self.split_name, self.train_ratio, self.val_ratio, self.test_ratio, self.seed)
+        raise ValueError(f"Unsupported split_mode for streaming: {self.split_mode}")
+
+    def _iter_records(self) -> Iterator[Dict[str, Any]]:
+        worker = get_worker_info()
+        pairs = self.npy_pairs
+        if worker is not None:
+            pairs = list(islice(pairs, worker.id, None, worker.num_workers))
+
+        for pair in pairs:
+            tokens = _load_npy_records(pair.tokens_path)
+            references = _load_npy_records(pair.reference_path)
+            if len(tokens) != len(references):
+                raise ValueError(
+                    f"Tokens/Reference length mismatch for {pair.tokens_path}: "
+                    f"{len(tokens)} vs {len(references)}"
+                )
+            for idx, (token_row, ref_row) in enumerate(zip(tokens, references)):
+                if not self._include(pair.tokens_path, idx):
+                    continue
+                signal_str = _normalize_tokens(token_row)
+                if not signal_str:
+                    continue
+                labels = _parse_bases(ref_row)
+                yield {
+                    "signal_str": _apply_token_offset_to_signal_str(signal_str, self.token_offset),
+                    "target_seq": [x for x in np.asarray(labels).reshape(-1).tolist() if int(x) > 0],
+                }
+
+    def __iter__(self):
+        stream = self._iter_records()
+        if self.shuffle_buffer_size <= 1:
+            yield from stream
+            return
+        rng = np.random.default_rng(self.seed + (get_worker_info().id if get_worker_info() else 0))
+        buf: List[Dict[str, Any]] = []
+        for item in stream:
+            if len(buf) < self.shuffle_buffer_size:
+                buf.append(item)
+                continue
+            j = int(rng.integers(0, len(buf)))
+            out = buf[j]
+            buf[j] = item
+            yield out
+        while buf:
+            j = int(rng.integers(0, len(buf)))
+            yield buf.pop(j)
 
 
 def create_collate_fn(tokenizer: PreTrainedTokenizerBase):
