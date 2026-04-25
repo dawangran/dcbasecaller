@@ -145,6 +145,51 @@ basecall-train \
   --output_dir outputs
 ```
 
+### Split each file into 7:2:1 (recommended for many files)
+
+If you have many files (e.g., 100 files) and want every file to contribute train/val/test samples:
+
+```bash
+basecall-train \
+  --jsonl_paths /path/to/data \
+  --group_by record_per_file \
+  --train_ratio 0.7 --val_ratio 0.2 --test_ratio 0.1 \
+  --split_seed 42 \
+  --model_name_or_path <hf-model> \
+  --output_dir outputs
+```
+
+### Large-scale training optimization (100+ files)
+
+When data is very large, enable streaming to avoid loading all reads into RAM:
+
+```bash
+basecall-train \
+  --jsonl_paths /path/to/data \
+  --group_by record_per_file \
+  --train_ratio 0.7 --val_ratio 0.2 --test_ratio 0.1 \
+  --streaming \
+  --shuffle_buffer_size 10000 \
+  --steps_per_epoch 5000 \
+  --num_workers 8 \
+  --model_name_or_path <hf-model> \
+  --output_dir outputs
+```
+
+Notes:
+- `--streaming`: uses iterable/generator-style loading to reduce peak memory.
+- `--shuffle_buffer_size`: approximate shuffle in streaming mode (bigger = better randomness, more RAM).
+- `--steps_per_epoch`: required in streaming mode because iterable dataloaders may not have a fixed length.
+- In streaming + `record`/`record_per_file`, split assignment is hash-based and deterministic, so ratios are approximate (converges as data grows).
+
+Quick parameter guide (for the command above):
+- `--group_by record_per_file`: split records *inside each file* into train/val/test by ratio.
+- `--train_ratio/--val_ratio/--test_ratio`: target split ratios (must sum to 1.0).
+- `--streaming`: do not preload full dataset into RAM; read samples on the fly.
+- `--shuffle_buffer_size 10000`: bounded shuffle window; larger value improves randomness but uses more memory.
+- `--steps_per_epoch 5000`: how many optimizer steps to run each epoch when using streaming mode.
+- `--num_workers 8`: number of dataloader worker processes; usually tune by CPU cores and storage speed.
+
 ### All training arguments
 
 **Data & split**
@@ -152,10 +197,12 @@ basecall-train \
 - `--train_jsonl_paths`, `--val_jsonl_paths`, `--test_jsonl_paths`: explicit JSONL split inputs (skip auto split).
 - `--npy_paths`: comma-separated folders or `tokens_*.npy`/`reference_*.npy` files (uses token/reference pairs).
 - `--train_npy_paths`, `--val_npy_paths`, `--test_npy_paths`: explicit npy split inputs (skip auto split).
-- `--group_by`: `folder`, `file`, or `record` (auto split granularity; use `record` to shuffle all reads across files and then split).
+- `--group_by`: `folder`, `file`, `record`, or `record_per_file` (`record_per_file` splits each file internally by the given ratios, e.g. 7:2:1).
 - `--recursive`: scan subfolders for `.jsonl.gz` or tokens/reference `.npy`.
 - `--train_ratio`, `--val_ratio`, `--test_ratio`: ratios for auto split.
 - `--split_seed`: random seed for auto split.
+- `--streaming`: stream records instead of fully materializing datasets in memory.
+- `--shuffle_buffer_size`: streaming shuffle buffer size.
 
 **Model & freezing**
 - `--model_name_or_path`: for `--feature_source hidden|embedding`, this is the backbone HuggingFace model ID/local path; for `--feature_source vq_embedding`, this is the VQ tokenize model checkpoint path (used by `poregpt.tokenizers.VQETokenizer`).
