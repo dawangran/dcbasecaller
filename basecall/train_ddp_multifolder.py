@@ -23,6 +23,7 @@ import os
 import socket
 import math
 import argparse
+import gzip
 import matplotlib.pyplot as plt
 import logging
 from contextlib import nullcontext
@@ -159,6 +160,41 @@ def _safe_len(x) -> Optional[int]:
 def _safe_len_str(x) -> str:
     n = _safe_len(x)
     return str(n) if n is not None else "?"
+
+
+def _count_jsonl_records(path: str) -> int:
+    n = 0
+    with gzip.open(path, "rt", encoding="utf-8") as f:
+        for line in f:
+            if line.strip():
+                n += 1
+    return n
+
+
+def _count_npy_records(path: str) -> int:
+    arr = np.load(path, allow_pickle=True)
+    if isinstance(arr, np.ndarray):
+        if arr.ndim == 0:
+            return 1
+        return int(arr.shape[0])
+    return 1
+
+
+def _estimate_streaming_train_size(dataset) -> Optional[int]:
+    """
+    Estimate iterable train dataset size for scheduler/steps_per_epoch fallback.
+    """
+    if isinstance(dataset, StreamingJsonlSignalRefDataset):
+        total = sum(_count_jsonl_records(jf.path) for jf in dataset.jsonl_files)
+        if dataset.split_mode in ("folder", "file"):
+            return total
+        return int(round(total * float(dataset.train_ratio)))
+    if isinstance(dataset, StreamingNpySignalRefDataset):
+        total = sum(_count_npy_records(pair.tokens_path) for pair in dataset.npy_pairs)
+        if dataset.split_mode in ("folder", "file"):
+            return total
+        return int(round(total * float(dataset.train_ratio)))
+    return None
 
 
 def setup_logger(log_file: str, accelerator: Accelerator) -> logging.Logger:
@@ -661,7 +697,7 @@ def parse_args():
     p.add_argument("--batch_size", type=int, default=128)
     p.add_argument("--num_epochs", type=int, default=50)
     p.add_argument("--steps_per_epoch", type=int, default=0,
-                   help="Required for --streaming when dataloader length is unknown.")
+                   help="Optional override for streaming when dataloader length is unknown (0=auto estimate).")
     p.add_argument("--num_workers", type=int, default=4)
     p.add_argument("--quick", action="store_true",
                    help="Quick mode alias: freeze backbone + ctc_crf_state_len=5 + ctc_crf_blank_score=0 + head_output_scale=5 + head_output_activation=tanh + head_type=ctc_crf + pre_ctc_module=none.")
@@ -1297,9 +1333,19 @@ def main():
     optimizer = build_adamw_with_no_decay(model.named_parameters(), lr=args.lr, weight_decay=args.weight_decay)
     steps_per_epoch = _safe_len(train_loader)
     if steps_per_epoch is None:
-        if args.steps_per_epoch <= 0:
-            raise ValueError("When using --streaming, provide --steps_per_epoch > 0 because len(train_loader) is undefined.")
-        steps_per_epoch = int(args.steps_per_epoch)
+        if args.steps_per_epoch > 0:
+            steps_per_epoch = int(args.steps_per_epoch)
+        else:
+            est_train_size = _estimate_streaming_train_size(train_dataset)
+            if est_train_size is None:
+                raise ValueError("Could not infer streaming steps_per_epoch; please set --steps_per_epoch > 0.")
+            steps_per_epoch = max(int(math.ceil(est_train_size / max(int(args.batch_size), 1))), 1)
+            if is_main_process(accelerator):
+                logger.info(
+                    f"[Data] Auto-estimated steps_per_epoch={steps_per_epoch} "
+                    f"(estimated_train_size={est_train_size}, batch_size={args.batch_size}). "
+                    "Set --steps_per_epoch to override."
+                )
     total_steps = steps_per_epoch * args.num_epochs
     warmup_steps = int(total_steps * args.warmup_ratio)
     scheduler, sched_name = build_scheduler(optimizer, total_steps, warmup_steps, args.min_lr, logger, accelerator)

@@ -179,7 +179,7 @@ basecall-train \
 Notes:
 - `--streaming`: uses iterable/generator-style loading to reduce peak memory.
 - `--shuffle_buffer_size`: approximate shuffle in streaming mode (bigger = better randomness, more RAM).
-- `--steps_per_epoch`: required in streaming mode because iterable dataloaders may not have a fixed length.
+- `--steps_per_epoch`: optional in streaming mode; if omitted, training auto-estimates it from dataset size and batch size.
 - In streaming + `record`/`record_per_file`, split assignment is hash-based and deterministic, so ratios are approximate (converges as data grows).
 
 Quick parameter guide (for the command above):
@@ -188,6 +188,7 @@ Quick parameter guide (for the command above):
 - `--streaming`: do not preload full dataset into RAM; read samples on the fly.
 - `--shuffle_buffer_size 10000`: bounded shuffle window; larger value improves randomness but uses more memory.
 - `--steps_per_epoch 5000`: how many optimizer steps to run each epoch when using streaming mode.
+- if not sure, you can leave `--steps_per_epoch` unset (or `0`) and let the script auto-estimate it.
 - `--num_workers 8`: number of dataloader worker processes; usually tune by CPU cores and storage speed.
 
 ### All training arguments
