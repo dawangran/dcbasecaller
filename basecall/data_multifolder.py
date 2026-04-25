@@ -799,7 +799,6 @@ def create_collate_fn(tokenizer: PreTrainedTokenizerBase):
             "attention_mask": attention_mask,
             "target_labels": target_labels,
             "target_lengths": target_lengths,
-            "target_seqs": target_seqs,
         }
     return fn
 
@@ -879,7 +878,6 @@ def create_vq_collate_fn():
             "attention_mask": attention_mask,
             "target_labels": target_labels,
             "target_lengths": target_lengths,
-            "target_seqs": target_seqs,
         }
 
     return fn

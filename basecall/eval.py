@@ -83,6 +83,18 @@ def merge_counts(total: Dict[str, int], item: Dict[str, int]) -> Dict[str, int]:
     return total
 
 
+def _rebuild_target_seqs(target_labels: torch.Tensor, target_lengths: torch.Tensor) -> List[List[int]]:
+    labels = target_labels.detach().cpu().tolist()
+    lengths = target_lengths.detach().cpu().tolist()
+    out: List[List[int]] = []
+    offset = 0
+    for ln in lengths:
+        ln_i = int(ln)
+        out.append([int(x) for x in labels[offset: offset + ln_i]])
+        offset += ln_i
+    return out
+
+
 def counts_to_ratio(counts: Dict[str, int]) -> Dict[str, float]:
     denom = sum(counts.values())
     if denom == 0:
@@ -423,7 +435,10 @@ def main() -> None:
                 reverse=False,
                 input_lengths=input_lengths,
             )
-        ref_ids = batch["target_seqs"]
+        ref_ids = _rebuild_target_seqs(
+            batch["target_labels"].to(device),
+            batch["target_lengths"].to(device),
+        )
 
         acc = batch_bonito_accuracy(
             pred_ids,

@@ -204,6 +204,7 @@ Quick parameter guide (for the command above):
 - `--split_seed`: random seed for auto split.
 - `--streaming`: stream records instead of fully materializing datasets in memory.
 - `--shuffle_buffer_size`: streaming shuffle buffer size.
+- `--wandb_log_alignment_every`: if >0, log one validation alignment heatmap to W&B every N epochs (plus final alignment at training end).
 
 **Model & freezing**
 - `--model_name_or_path`: for `--feature_source hidden|embedding`, this is the backbone HuggingFace model ID/local path; for `--feature_source vq_embedding`, this is the VQ tokenize model checkpoint path (used by `poregpt.tokenizers.VQETokenizer`).

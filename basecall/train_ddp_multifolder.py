@@ -33,7 +33,7 @@ import numpy as np
 
 import torch
 import torch.distributed as dist
-from accelerate import Accelerator
+from accelerate import Accelerator, DataLoaderConfiguration
 from accelerate.utils import DistributedDataParallelKwargs, InitProcessGroupKwargs
 from torch.utils.data import DataLoader, Subset, IterableDataset
 from tqdm.auto import tqdm
@@ -195,6 +195,18 @@ def _estimate_streaming_train_size(dataset) -> Optional[int]:
             return total
         return int(round(total * float(dataset.train_ratio)))
     return None
+
+
+def _rebuild_target_seqs(target_labels: torch.Tensor, target_lengths: torch.Tensor) -> List[List[int]]:
+    labels = target_labels.detach().cpu().tolist()
+    lengths = target_lengths.detach().cpu().tolist()
+    out: List[List[int]] = []
+    offset = 0
+    for ln in lengths:
+        ln_i = int(ln)
+        out.append([int(x) for x in labels[offset: offset + ln_i]])
+        offset += ln_i
+    return out
 
 
 def setup_logger(log_file: str, accelerator: Accelerator) -> logging.Logger:
@@ -386,6 +398,7 @@ def train_one_epoch(
 
         target_labels = batch["target_labels"].to(device)
         target_lengths = batch["target_lengths"].to(device)
+        target_seqs = _rebuild_target_seqs(target_labels, target_lengths)
 
         optimizer.zero_grad(set_to_none=True)
 
@@ -537,14 +550,14 @@ def eval_one_epoch(
 
         acc = batch_bonito_accuracy(
             pred_seqs,
-            batch["target_seqs"],
+            target_seqs,
             balanced=acc_balanced,
             min_coverage=acc_min_coverage,
         )
         total_acc += float(acc)
         n_acc += 1
 
-        for r_ids, pred_ids, input_len in zip(batch["target_seqs"], pred_seqs, input_len_list):
+        for r_ids, pred_ids, input_len in zip(target_seqs, pred_seqs, input_len_list):
             step_len = int(input_len)
             if step_len <= 0:
                 blank_ratios.append(1.0)
@@ -578,6 +591,72 @@ def eval_one_epoch(
     avg_blank = reduce_mean(accelerator, avg_blank, device)
     avg_nonzero_len = reduce_mean(accelerator, avg_nonzero_len, device)
     return avg_loss, avg_acc, avg_crf_acc, avg_cov, avg_blank, avg_nonzero_len
+
+
+@torch.no_grad()
+def log_alignment_to_wandb(
+    accelerator: Accelerator,
+    model,
+    loader,
+    device,
+    use_amp: bool,
+    decoder_mode: str,
+    blank_idx: int,
+    koi_blank_score: float,
+    image_key: str,
+    epoch: Optional[int] = None,
+):
+    if loader is None or not is_main_process(accelerator) or wandb is None:
+        return
+    batch = next(iter(loader))
+    input_ids = batch["input_ids"].to(device)
+    attention_mask = batch.get("attention_mask", None)
+    if attention_mask is not None:
+        attention_mask = attention_mask.to(device)
+    with accelerator.autocast() if use_amp else nullcontext():
+        logits_btc = model(input_ids, attention_mask=attention_mask)
+    logits_tbc = logits_btc.transpose(0, 1)
+    input_lengths = resolve_input_lengths(
+        input_ids,
+        attention_mask=attention_mask,
+        input_lengths=batch.get("input_lengths"),
+    )
+    if decoder_mode == "koi":
+        pred_seqs = koi_beam_search_decode(
+            logits_tbc,
+            blank_score=float(koi_blank_score),
+            input_lengths=input_lengths,
+        )
+    elif decoder_mode == "ctc_viterbi":
+        pred_seqs = ctc_viterbi_decode(
+            logits_tbc,
+            input_lengths=input_lengths,
+            blank_idx=blank_idx,
+        )
+    else:
+        pred_seqs = []
+        input_len_list = input_lengths.detach().cpu().tolist()
+        for idx, input_len in enumerate(input_len_list):
+            step_len = int(input_len)
+            if step_len <= 0:
+                pred_seqs.append([])
+                continue
+            decoded_ids = ctc_crf_decode(
+                logits_tbc[:step_len, idx : idx + 1, :].float(),
+                blank_idx=blank_idx,
+            )[0]
+            pred_seqs.append(decoded_ids[:step_len])
+
+    ref_seqs = _rebuild_target_seqs(
+        batch["target_labels"].to(device),
+        batch["target_lengths"].to(device),
+    )
+    fig = plot_alignment_heatmap(pred_seqs, ref_seqs, max_reads=32, max_len=80)
+    payload: Dict[str, Any] = {image_key: wandb.Image(fig)}
+    if epoch is not None:
+        payload["epoch"] = int(epoch)
+    wandb.log(payload)
+    plt.close(fig)
 
 
 # -------------------- pretrained loader (keep) --------------------
@@ -719,6 +798,8 @@ def parse_args():
                    help="Optional W&B group name (useful for grouping condition sweeps).")
     p.add_argument("--wandb_job_type", type=str, default="train",
                    help="W&B job_type for this run.")
+    p.add_argument("--wandb_log_alignment_every", type=int, default=0,
+                   help="If >0, log one validation alignment heatmap to W&B every N epochs.")
 
     p.add_argument("--find_unused_parameters", action="store_true",
                    help="Enable DDP unused parameter detection (fix reduction error).")
@@ -808,8 +889,13 @@ def main():
         backend=backend,
         timeout=timedelta(minutes=30),
     )
+    dataloader_config = DataLoaderConfiguration(
+        dispatch_batches=False if args.streaming else None,
+        split_batches=False,
+    )
     accelerator = Accelerator(
         kwargs_handlers=[ddp_kwargs, init_pg_kwargs],
+        dataloader_config=dataloader_config,
         mixed_precision="fp16" if args.amp and torch.cuda.is_available() else "no",
         log_with="wandb" if args.use_wandb and wandb is not None else None,
     )
@@ -1493,6 +1579,19 @@ def main():
                     if decoder_mode == "ctc_crf":
                         payload["val/crf_acc"] = float(val_crf_acc)
                     wandb.log(payload)
+                    if args.wandb_log_alignment_every > 0 and (epoch % args.wandb_log_alignment_every == 0):
+                        log_alignment_to_wandb(
+                            accelerator=accelerator,
+                            model=model,
+                            loader=val_loader,
+                            device=device,
+                            use_amp=use_amp,
+                            decoder_mode=decoder_mode,
+                            blank_idx=BLANK_IDX,
+                            koi_blank_score=float(args.koi_blank_score),
+                            image_key="val/alignment",
+                            epoch=epoch,
+                        )
 
         # ---- checkpoint save ----
         accelerator.wait_for_everyone()
@@ -1581,49 +1680,18 @@ def main():
     if use_wandb and wandb is not None and is_main_process(accelerator):
         loader = test_loader if test_loader is not None else val_loader
         if loader is not None:
-            batch = next(iter(loader))
-            input_ids = batch["input_ids"].to(device)
-            attention_mask = batch.get("attention_mask")
-            if attention_mask is not None:
-                attention_mask = attention_mask.to(device)
-            with torch.no_grad():
-                with accelerator.autocast() if use_amp else nullcontext():
-                    logits_btc = model(input_ids, attention_mask=attention_mask)
-                logits_tbc = logits_btc.transpose(0, 1)
-            input_lengths = resolve_input_lengths(
-                input_ids,
-                attention_mask=attention_mask,
-                input_lengths=batch.get("input_lengths"),
+            log_alignment_to_wandb(
+                accelerator=accelerator,
+                model=model,
+                loader=loader,
+                device=device,
+                use_amp=use_amp,
+                decoder_mode=decoder_mode,
+                blank_idx=BLANK_IDX,
+                koi_blank_score=float(args.koi_blank_score),
+                image_key="final/base_alignment",
+                epoch=args.num_epochs,
             )
-            if decoder_mode == "koi":
-                pred_seqs = koi_beam_search_decode(
-                    logits_tbc,
-                    blank_score=float(args.koi_blank_score),
-                    input_lengths=input_lengths,
-                )
-            elif decoder_mode == "ctc_viterbi":
-                pred_seqs = ctc_viterbi_decode(
-                    logits_tbc,
-                    input_lengths=input_lengths,
-                    blank_idx=BLANK_IDX,
-                )
-            else:
-                pred_seqs = []
-                input_len_list = input_lengths.detach().cpu().tolist()
-                for idx, input_len in enumerate(input_len_list):
-                    step_len = int(input_len)
-                    if step_len <= 0:
-                        pred_seqs.append([])
-                        continue
-                    decoded_ids = ctc_crf_decode(
-                        logits_tbc[:step_len, idx : idx + 1, :].float(),
-                        blank_idx=BLANK_IDX,
-                    )[0]
-                    pred_seqs.append(decoded_ids[:step_len])
-            ref_seqs = batch["target_seqs"]
-            fig = plot_alignment_heatmap(pred_seqs, ref_seqs, max_reads=32, max_len=80)
-            wandb.log({"final/base_alignment": wandb.Image(fig)})
-            plt.close(fig)
 
     if use_wandb and wandb is not None:
         wandb.finish()
