@@ -493,6 +493,7 @@ def eval_one_epoch(
 
         target_labels = batch["target_labels"].to(device)
         target_lengths = batch["target_lengths"].to(device)
+        target_seqs = _rebuild_target_seqs(target_labels, target_lengths)
         
         attention_mask = batch.get("attention_mask", None)
         if attention_mask is not None:
