@@ -363,7 +363,9 @@ def load_checkpoint(path: str,
 
     start_epoch = int(ckpt.get("epoch", 0)) + 1
     best_pbma = ckpt.get("best_pbma", None)
-    return start_epoch, best_pbma
+    global_step = int(ckpt.get("global_step", 0) or 0)
+    wandb_run_id = ckpt.get("wandb_run_id", None)
+    return start_epoch, best_pbma, global_step, wandb_run_id
 
 
 # -------------------- train/eval --------------------
@@ -381,6 +383,7 @@ def train_one_epoch(
     use_amp: bool,
     clip_grad_norm: float,
     head_type: str,
+    global_step_start: int = 0,
 ):
     model.train()
     total_loss, n_batches = 0.0, 0
@@ -388,6 +391,7 @@ def train_one_epoch(
     total_steps_hint = _safe_len(data_loader)
     it = tqdm(enumerate(data_loader, start=1), total=total_steps_hint,
               disable=not is_main_process(accelerator), desc="[train]")
+    global_step = int(global_step_start)
     for step, batch in it:
         input_ids = batch["input_ids"].to(device)
         input_lengths = resolve_input_lengths(
@@ -438,6 +442,7 @@ def train_one_epoch(
             optimizer.step()
             if scheduler is not None:
                 scheduler.step()
+            global_step += 1
         elif is_main_process(accelerator):
             step_den = total_steps_hint if total_steps_hint is not None else "?"
             print(f"[Train] step={step}/{step_den} non-finite loss detected on >=1 rank; skipping optimizer step on all ranks.")
@@ -451,10 +456,17 @@ def train_one_epoch(
             msg = f"[Train] step={step}/{step_den} loss={loss.item():.4f} lr={lr:.6g}"
             print(msg)
             if use_wandb and wandb is not None:
-                wandb.log({"train/loss": float(loss.item()), "lr": float(lr), "step": step})
+                wandb.log(
+                    {
+                        "train/loss": float(loss.item()),
+                        "lr": float(lr),
+                        "trainer/global_step": int(global_step),
+                    },
+                    step=int(global_step),
+                )
 
     avg = total_loss / max(n_batches, 1)
-    return reduce_mean(accelerator, avg, device)
+    return reduce_mean(accelerator, avg, device), global_step
 
 
 @torch.no_grad()
@@ -606,6 +618,7 @@ def log_alignment_to_wandb(
     koi_blank_score: float,
     image_key: str,
     epoch: Optional[int] = None,
+    global_step: Optional[int] = None,
 ):
     if loader is None or not is_main_process(accelerator) or wandb is None:
         return
@@ -656,7 +669,10 @@ def log_alignment_to_wandb(
     payload: Dict[str, Any] = {image_key: wandb.Image(fig)}
     if epoch is not None:
         payload["epoch"] = int(epoch)
-    wandb.log(payload)
+    if global_step is None:
+        wandb.log(payload)
+    else:
+        wandb.log(payload, step=int(global_step))
     plt.close(fig)
 
 
@@ -800,7 +816,7 @@ def parse_args():
     p.add_argument("--wandb_job_type", type=str, default="train",
                    help="W&B job_type for this run.")
     p.add_argument("--wandb_log_alignment_every", type=int, default=0,
-                   help="If >0, log one validation alignment heatmap to W&B every N epochs.")
+                   help="If >0, run test evaluation and log one test alignment heatmap to W&B every N epochs.")
 
     p.add_argument("--find_unused_parameters", action="store_true",
                    help="Enable DDP unused parameter detection (fix reduction error).")
@@ -1457,26 +1473,13 @@ def main():
             logger=logger,
         )
 
-    # ---- wandb ----
-    use_wandb = bool(args.use_wandb and wandb is not None and is_main_process(accelerator))
-    if args.use_wandb and wandb is None and is_main_process(accelerator):
-        logger.warning("[wandb] wandb not installed; pip install wandb")
-
-    if use_wandb:
-        wandb.init(
-            project=args.wandb_project,
-            entity=args.wandb_entity,
-            name=args.wandb_run_name,
-            group=args.wandb_group,
-            job_type=args.wandb_job_type,
-            config=vars(args),
-        )
-
     # ---- resume (after model+optim+sched created) ----
     start_epoch = 1
     best_pbma = -1.0
+    global_step = 0
+    resume_wandb_run_id: Optional[str] = None
     if args.resume_ckpt:
-        se, bp = load_checkpoint(
+        se, bp, gs, wrid = load_checkpoint(
             args.resume_ckpt,
             accelerator,
             model,
@@ -1486,13 +1489,37 @@ def main():
             logger=logger if is_main_process(accelerator) else None,
         )
         start_epoch = se
+        global_step = int(gs)
+        resume_wandb_run_id = wrid if isinstance(wrid, str) and wrid else None
         if bp is not None:
             try:
                 best_pbma = float(bp)
             except Exception:
                 pass
         if is_main_process(accelerator):
-            logger.info(f"[Resume] start_epoch={start_epoch}, best_acc={best_pbma}")
+            logger.info(
+                f"[Resume] start_epoch={start_epoch}, best_acc={best_pbma}, "
+                f"global_step={global_step}, wandb_run_id={resume_wandb_run_id}"
+            )
+
+    # ---- wandb ----
+    use_wandb = bool(args.use_wandb and wandb is not None and is_main_process(accelerator))
+    if args.use_wandb and wandb is None and is_main_process(accelerator):
+        logger.warning("[wandb] wandb not installed; pip install wandb")
+
+    if use_wandb:
+        init_kwargs = dict(
+            project=args.wandb_project,
+            entity=args.wandb_entity,
+            name=args.wandb_run_name,
+            group=args.wandb_group,
+            job_type=args.wandb_job_type,
+            config=vars(args),
+        )
+        if resume_wandb_run_id:
+            init_kwargs["id"] = resume_wandb_run_id
+            init_kwargs["resume"] = "must"
+        wandb.init(**init_kwargs)
 
     # ---- loop ----
     train_losses, val_losses, val_accs = [], [], []
@@ -1519,7 +1546,7 @@ def main():
         logger.info(f"[Decoder] mode={decoder_mode} use_amp={use_amp}")
 
     for epoch in range(start_epoch, args.num_epochs + 1):
-        tr_loss = train_one_epoch(
+        tr_loss, global_step = train_one_epoch(
             accelerator,
             model,
             train_loader,
@@ -1532,6 +1559,7 @@ def main():
             use_amp,
             args.clip_grad_norm,
             args.head_type,
+            global_step_start=global_step,
         )
         train_losses.append(tr_loss)
 
@@ -1579,25 +1607,67 @@ def main():
                     }
                     if decoder_mode == "ctc_crf":
                         payload["val/crf_acc"] = float(val_crf_acc)
-                    wandb.log(payload)
-                    if args.wandb_log_alignment_every > 0 and (epoch % args.wandb_log_alignment_every == 0):
-                        log_alignment_to_wandb(
-                            accelerator=accelerator,
-                            model=model,
-                            loader=val_loader,
-                            device=device,
-                            use_amp=use_amp,
-                            decoder_mode=decoder_mode,
-                            blank_idx=BLANK_IDX,
-                            koi_blank_score=float(args.koi_blank_score),
-                            image_key="val/alignment",
-                            epoch=epoch,
-                        )
+                    wandb.log(payload, step=int(global_step))
+        if args.wandb_log_alignment_every > 0 and (epoch % args.wandb_log_alignment_every == 0):
+            if test_loader is not None:
+                epoch_test_loss, epoch_test_acc, epoch_test_crf_acc, epoch_test_cov, epoch_test_blank, epoch_test_nonzero_len = eval_one_epoch(
+                    accelerator,
+                    model,
+                    test_loader,
+                    device,
+                    "test",
+                    args.ctc_crf_blank_score,
+                    args.koi_blank_score,
+                    args.acc_balanced,
+                    args.acc_min_coverage,
+                    use_amp,
+                    decoder_mode,
+                    args.head_type,
+                )
+                if is_main_process(accelerator):
+                    logger.info(
+                        f"[Test@Epoch] epoch={epoch} loss={epoch_test_loss:.4f} acc={epoch_test_acc:.4f} "
+                        f"coverage={epoch_test_cov:.4f} blank={epoch_test_blank:.4f} nonzero_len={epoch_test_nonzero_len:.2f}"
+                    )
+                    if use_wandb and wandb is not None:
+                        payload = {
+                            "test/periodic_loss": float(epoch_test_loss),
+                            "test/periodic_acc": float(epoch_test_acc),
+                            "test/periodic_coverage": float(epoch_test_cov),
+                            "test/periodic_blank": float(epoch_test_blank),
+                            "test/periodic_nonzero_len": float(epoch_test_nonzero_len),
+                            "epoch": epoch,
+                        }
+                        if decoder_mode == "ctc_crf":
+                            payload["test/periodic_crf_acc"] = float(epoch_test_crf_acc)
+                        wandb.log(payload, step=int(global_step))
+                if use_wandb and wandb is not None:
+                    log_alignment_to_wandb(
+                        accelerator=accelerator,
+                        model=model,
+                        loader=test_loader,
+                        device=device,
+                        use_amp=use_amp,
+                        decoder_mode=decoder_mode,
+                        blank_idx=BLANK_IDX,
+                        koi_blank_score=float(args.koi_blank_score),
+                        image_key="test/alignment",
+                        epoch=epoch,
+                        global_step=global_step,
+                    )
+            elif is_main_process(accelerator):
+                logger.warning(
+                    f"[Test@Epoch] --wandb_log_alignment_every={args.wandb_log_alignment_every} is set, "
+                    "but no test split is available; skipping periodic test eval/alignment logging."
+                )
 
         # ---- checkpoint save ----
         accelerator.wait_for_everyone()
         if is_main_process(accelerator) and (epoch % max(args.save_every, 1) == 0):
             last_path = os.path.join(args.output_dir, "ckpt_last.pt")
+            current_wandb_run_id = (
+                str(getattr(wandb.run, "id", "")) if (use_wandb and wandb is not None and wandb.run is not None) else resume_wandb_run_id
+            )
             save_checkpoint(
                 last_path,
                 accelerator,
@@ -1606,7 +1676,13 @@ def main():
                 scheduler=scheduler,
                 epoch=epoch,
                 best_pbma=best_pbma,
-                extra={"train_loss": tr_loss, "val_loss": val_loss, "val_acc": val_acc},
+                extra={
+                    "train_loss": tr_loss,
+                    "val_loss": val_loss,
+                    "val_acc": val_acc,
+                    "global_step": int(global_step),
+                    "wandb_run_id": current_wandb_run_id,
+                },
             )
             logger.info(f"[CKPT] saved {last_path}")
 
@@ -1614,6 +1690,9 @@ def main():
             if float(val_acc) > float(best_pbma):
                 best_pbma = float(val_acc)
                 best_path = os.path.join(args.output_dir, "ckpt_best.pt")
+                current_wandb_run_id = (
+                    str(getattr(wandb.run, "id", "")) if (use_wandb and wandb is not None and wandb.run is not None) else resume_wandb_run_id
+                )
                 save_checkpoint(
                     best_path,
                     accelerator,
@@ -1622,12 +1701,18 @@ def main():
                     scheduler=scheduler,
                     epoch=epoch,
                     best_pbma=best_pbma,
-                    extra={"train_loss": tr_loss, "val_loss": val_loss, "val_acc": val_acc},
+                    extra={
+                        "train_loss": tr_loss,
+                        "val_loss": val_loss,
+                        "val_acc": val_acc,
+                        "global_step": int(global_step),
+                        "wandb_run_id": current_wandb_run_id,
+                    },
                 )
                 logger.info(f"[CKPT] new best acc={best_pbma:.4f} @ epoch={epoch}, saved {best_path}")
 
         if use_wandb and wandb is not None and is_main_process(accelerator):
-            wandb.log({"epoch": epoch, "train/epoch_loss": float(tr_loss)})
+            wandb.log({"epoch": epoch, "train/epoch_loss": float(tr_loss)}, step=int(global_step))
 
     # ---- test ----
     if test_loader is not None:
@@ -1666,7 +1751,7 @@ def main():
                 }
                 if decoder_mode == "ctc_crf":
                     payload["test/crf_acc"] = float(test_crf_acc)
-                wandb.log(payload)
+                wandb.log(payload, step=int(global_step))
 
     # ---- final save curves/csv ----
     if is_main_process(accelerator):
@@ -1692,6 +1777,7 @@ def main():
                 koi_blank_score=float(args.koi_blank_score),
                 image_key="final/base_alignment",
                 epoch=args.num_epochs,
+                global_step=global_step,
             )
 
     if use_wandb and wandb is not None:
