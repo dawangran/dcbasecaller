@@ -263,7 +263,8 @@ basecall-train \
 
 
 **Optimization**
-- `--batch_size`, `--num_epochs`, `--lr`, `--weight_decay`, `--warmup_ratio`, `--min_lr`.
+- `--batch_size`, `--num_epochs`, `--lr`, `--weight_decay`, `--warmup_ratio`, `--warmup_steps`, `--min_lr`.
+- `--warmup_steps`: if set to `>=0`, uses absolute warmup steps and overrides `--warmup_ratio`.
 - `--ctc_crf_state_len`: Bonito CTC-CRF state length (controls CRF head output classes).
 - `--ctc_crf_blank_score`: fixed blank score for CTC-CRF (blank is not trained).
 - `--train_decoder`: choose `ctc_viterbi`, `ctc_crf` (fp32), or `koi` for accuracy/blank metrics.
