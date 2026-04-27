@@ -800,7 +800,10 @@ def parse_args():
 
     p.add_argument("--lr", type=float, default=3e-4)
     p.add_argument("--weight_decay", type=float, default=1e-3)
-    p.add_argument("--warmup_ratio", type=float, default=0.02)
+    p.add_argument("--warmup_ratio", type=float, default=0.02,
+                   help="Warmup ratio over total training steps (used when --warmup_steps < 0).")
+    p.add_argument("--warmup_steps", type=int, default=-1,
+                   help="Absolute warmup steps. If >=0, overrides --warmup_ratio.")
     p.add_argument("--min_lr", type=float, default=1e-5)
 
     p.add_argument("--seed", type=int, default=42)
@@ -1450,7 +1453,10 @@ def main():
                     "Set --steps_per_epoch to override."
                 )
     total_steps = steps_per_epoch * args.num_epochs
-    warmup_steps = int(total_steps * args.warmup_ratio)
+    if int(args.warmup_steps) >= 0:
+        warmup_steps = int(args.warmup_steps)
+    else:
+        warmup_steps = int(total_steps * args.warmup_ratio)
     scheduler, sched_name = build_scheduler(optimizer, total_steps, warmup_steps, args.min_lr, logger, accelerator)
     model, optimizer, train_loader, scheduler = accelerator.prepare(model, optimizer, train_loader, scheduler)
     if val_loader is not None:
