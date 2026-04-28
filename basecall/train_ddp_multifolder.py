@@ -834,7 +834,7 @@ def parse_args():
 
     # ✅ save frequency controls (minimal)
     p.add_argument("--save_every", type=int, default=1,
-                   help="Save ckpt_last.pt every N epochs (default 1).")
+                   help="Every N epochs, save rolling ckpt_last.pt and snapshot ckpt_epoch_<epoch>.pt (default 1).")
     p.add_argument("--save_best", action="store_true",
                    help="Save ckpt_best.pt based on best val_acc (default off unless provided).")
     p.add_argument("--freeze_backbone", action="store_true",
@@ -1671,9 +1671,17 @@ def main():
         accelerator.wait_for_everyone()
         if is_main_process(accelerator) and (epoch % max(args.save_every, 1) == 0):
             last_path = os.path.join(args.output_dir, "ckpt_last.pt")
+            epoch_path = os.path.join(args.output_dir, f"ckpt_epoch_{epoch}.pt")
             current_wandb_run_id = (
                 str(getattr(wandb.run, "id", "")) if (use_wandb and wandb is not None and wandb.run is not None) else resume_wandb_run_id
             )
+            ckpt_extra = {
+                "train_loss": tr_loss,
+                "val_loss": val_loss,
+                "val_acc": val_acc,
+                "global_step": int(global_step),
+                "wandb_run_id": current_wandb_run_id,
+            }
             save_checkpoint(
                 last_path,
                 accelerator,
@@ -1682,15 +1690,19 @@ def main():
                 scheduler=scheduler,
                 epoch=epoch,
                 best_pbma=best_pbma,
-                extra={
-                    "train_loss": tr_loss,
-                    "val_loss": val_loss,
-                    "val_acc": val_acc,
-                    "global_step": int(global_step),
-                    "wandb_run_id": current_wandb_run_id,
-                },
+                extra=ckpt_extra,
             )
-            logger.info(f"[CKPT] saved {last_path}")
+            save_checkpoint(
+                epoch_path,
+                accelerator,
+                model,
+                optimizer=optimizer,
+                scheduler=scheduler,
+                epoch=epoch,
+                best_pbma=best_pbma,
+                extra=ckpt_extra,
+            )
+            logger.info(f"[CKPT] saved {last_path} and {epoch_path}")
 
         if is_main_process(accelerator) and args.save_best and (val_acc is not None):
             if float(val_acc) > float(best_pbma):
