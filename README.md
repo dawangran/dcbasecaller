@@ -277,7 +277,8 @@ basecall-train \
 - `--resume_ckpt`: resume from `ckpt_last.pt` (model/optim/sched/epoch/best_acc).
 - `--pretrained_ckpt`: load pretrained weights into the model.
 - `--pretrained_strict`, `--pretrained_key`.
-- `--save_every`, `--save_best`.
+- `--save_every`: every N epochs, write both rolling `ckpt_last.pt` and snapshot `ckpt_epoch_<epoch>.pt`.
+- `--save_best`: additionally maintain `ckpt_best.pt` based on validation accuracy.
 
 **Distributed/Logging**
 - `--use_wandb`, `--wandb_project`, `--wandb_entity`, `--wandb_run_name`.
