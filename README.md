@@ -215,7 +215,23 @@ Quick parameter guide (for the command above):
 - `--freeze_backbone`: freeze backbone, train head only.
 - `--reset_backbone_weights`: reinitialize backbone weights for ablation.
 - `--unfreeze_last_n_layers`: unfreeze last N transformer layers.
+- `--unfreeze_after_epoch`: delayed unfreeze switch.
+  - `0` (default): disable delayed mode; `unfreeze_last_n_layers` / `unfreeze_layer_*` are applied at model init.
+  - `N > 0`: keep backbone frozen for epochs `1..N`, then start unfreezing at epoch `N+1`.
+  - Works with:
+    - `--unfreeze_last_n_layers` (unfreeze last N layers), or
+    - `--unfreeze_layer_start` + `--unfreeze_layer_end` (unfreeze `[start, end)`).
+  - If delayed mode is enabled, training code will force initial backbone freeze even if `--freeze_backbone` is not explicitly set.
+  - Unfrozen params are added into optimizer param groups at trigger epoch, so they immediately receive gradients/updates without restarting training.
 - `--unfreeze_layer_start`, `--unfreeze_layer_end`: unfreeze layers in range `[start, end)`.
+
+Examples:
+- Immediate unfreeze of last 4 layers from epoch 1:
+  - `--unfreeze_last_n_layers 4 --unfreeze_after_epoch 0`
+- Keep frozen for first 3 epochs, then unfreeze last 4 layers from epoch 4:
+  - `--unfreeze_last_n_layers 4 --unfreeze_after_epoch 3`
+- Keep frozen for first 2 epochs, then unfreeze layers `[8, 12)` from epoch 3:
+  - `--unfreeze_layer_start 8 --unfreeze_layer_end 12 --unfreeze_after_epoch 2`
 
 ### Train with tokenize model codebook embeddings (`vq_embedding`)
 
