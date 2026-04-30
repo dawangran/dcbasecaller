@@ -32,6 +32,7 @@ from typing import Tuple, Optional, Any, Dict, List
 import numpy as np
 
 import torch
+from torch import nn
 import torch.distributed as dist
 from accelerate import Accelerator, DataLoaderConfiguration
 from accelerate.utils import DistributedDataParallelKwargs, InitProcessGroupKwargs
