@@ -251,6 +251,29 @@ def build_adamw_with_no_decay(named_params, lr: float, weight_decay: float) -> t
     )
 
 
+def add_new_trainable_params_to_optimizer(
+    model: nn.Module,
+    optimizer: torch.optim.Optimizer,
+    weight_decay: float,
+) -> int:
+    """Add newly-unfrozen trainable params into existing optimizer param groups."""
+    tracked = {id(p) for group in optimizer.param_groups for p in group["params"]}
+    no_decay_keywords = ("bias", "LayerNorm.weight", "layer_norm.weight", "norm.weight")
+    decay_params, no_decay_params = [], []
+    for n, p in model.named_parameters():
+        if (not p.requires_grad) or (id(p) in tracked):
+            continue
+        if any(k in n for k in no_decay_keywords):
+            no_decay_params.append(p)
+        else:
+            decay_params.append(p)
+    if decay_params:
+        optimizer.add_param_group({"params": decay_params, "weight_decay": weight_decay})
+    if no_decay_params:
+        optimizer.add_param_group({"params": no_decay_params, "weight_decay": 0.0})
+    return len(decay_params) + len(no_decay_params)
+
+
 def build_scheduler(optimizer, total_steps: int, warmup_steps: int, min_lr: float,
                     logger: Optional[logging.Logger], accelerator: Accelerator):
     """
@@ -843,6 +866,8 @@ def parse_args():
                    help="Reinitialize backbone weights for ablation (ignores pretrained backbone init).")
     p.add_argument("--unfreeze_last_n_layers", type=int, default=0,
                    help="Unfreeze only the last N backbone layers (default: 0).")
+    p.add_argument("--unfreeze_after_epoch", type=int, default=0,
+                   help="Keep backbone frozen for the first N epochs, then apply unfreeze_last_n_layers / unfreeze_layer_* from epoch N+1.")
     p.add_argument("--unfreeze_layer_start", type=int, default=None,
                    help="Unfreeze backbone layers in [start, end). Optional finer control.")
     p.add_argument("--unfreeze_layer_end", type=int, default=None,
@@ -965,6 +990,8 @@ def main():
     else:
         num_classes = len(ID2BASE)
 
+    delayed_unfreeze = int(args.unfreeze_after_epoch) > 0
+    effective_freeze_backbone = bool(args.freeze_backbone or delayed_unfreeze)
     base_model = BasecallModel(
         model_path=args.model_name_or_path,
         num_classes=num_classes if num_classes is not None else None,
@@ -973,11 +1000,11 @@ def main():
         feature_source=args.feature_source,
         vq_device=args.vq_device,
         vq_token_batch_size=args.vq_token_batch_size,
-        freeze_backbone=bool(args.freeze_backbone),
+        freeze_backbone=effective_freeze_backbone,
         reset_backbone_weights=bool(args.reset_backbone_weights),
-        unfreeze_last_n_layers=args.unfreeze_last_n_layers,
-        unfreeze_layer_start=args.unfreeze_layer_start,
-        unfreeze_layer_end=args.unfreeze_layer_end,
+        unfreeze_last_n_layers=0 if delayed_unfreeze else args.unfreeze_last_n_layers,
+        unfreeze_layer_start=None if delayed_unfreeze else args.unfreeze_layer_start,
+        unfreeze_layer_end=None if delayed_unfreeze else args.unfreeze_layer_end,
         head_output_activation=args.head_output_activation,
         head_output_scale=args.head_output_scale,
         pre_head_type=args.pre_head_type,
@@ -994,6 +1021,16 @@ def main():
         raw_model = accelerator.unwrap_model(model)
         total_params, trainable_params = count_parameters(raw_model)
         logger.info(f"[Model] total_params={total_params:,} trainable_params={trainable_params:,}")
+        logger.info(
+            "[UnfreezePlan] unfreeze_after_epoch=%s unfreeze_last_n_layers=%s "
+            "unfreeze_layer_start=%s unfreeze_layer_end=%s",
+            args.unfreeze_after_epoch,
+            args.unfreeze_last_n_layers,
+            args.unfreeze_layer_start,
+            args.unfreeze_layer_end,
+        )
+        if delayed_unfreeze and not bool(args.freeze_backbone):
+            logger.info("[Unfreeze] --unfreeze_after_epoch enabled: forcing initial freeze_backbone=True before delayed unfreeze.")
         logger.info(f"[Model] architecture:\n{raw_model}")
 
     tokenizer = model.tokenizer
@@ -1551,7 +1588,56 @@ def main():
     if is_main_process(accelerator):
         logger.info(f"[Decoder] mode={decoder_mode} use_amp={use_amp}")
 
+    delayed_unfreeze_applied = False
     for epoch in range(start_epoch, args.num_epochs + 1):
+        if is_main_process(accelerator) and int(args.unfreeze_after_epoch) > 0:
+            if epoch <= int(args.unfreeze_after_epoch):
+                logger.info(
+                    f"[Unfreeze] epoch={epoch} backbone remains frozen (scheduled unfreeze starts at epoch={int(args.unfreeze_after_epoch) + 1})."
+                )
+            elif not delayed_unfreeze_applied:
+                logger.info(f"[Unfreeze] epoch={epoch} reached delayed-unfreeze trigger.")
+        if (
+            not delayed_unfreeze_applied
+            and int(args.unfreeze_after_epoch) > 0
+            and epoch > int(args.unfreeze_after_epoch)
+            and (
+                int(args.unfreeze_last_n_layers) > 0
+                or args.unfreeze_layer_start is not None
+                or args.unfreeze_layer_end is not None
+            )
+        ):
+            raw_model = accelerator.unwrap_model(model)
+            if raw_model.backbone is None:
+                raise ValueError("Delayed unfreeze is only supported when feature_source uses backbone.")
+            layers = raw_model._get_transformer_layers()
+            n_layers = len(layers)
+            if args.unfreeze_layer_start is not None or args.unfreeze_layer_end is not None:
+                start = 0 if args.unfreeze_layer_start is None else int(args.unfreeze_layer_start)
+                end = n_layers if args.unfreeze_layer_end is None else int(args.unfreeze_layer_end)
+                if start < 0:
+                    start = n_layers + start
+                if end < 0:
+                    end = n_layers + end
+                if not 0 <= start <= end <= n_layers:
+                    raise ValueError(f"Invalid unfreeze layer range: [{start}, {end}) with {n_layers} layers.")
+                target_layers = layers[start:end]
+            else:
+                n_unfreeze = min(int(args.unfreeze_last_n_layers), n_layers)
+                target_layers = layers[-n_unfreeze:]
+            for layer in target_layers:
+                for p in layer.parameters():
+                    p.requires_grad = True
+            # Stop forcing backbone eval() after unfreeze and allow normal train() behavior.
+            raw_model.freeze_backbone = False
+            newly_added = add_new_trainable_params_to_optimizer(raw_model, optimizer, args.weight_decay)
+            delayed_unfreeze_applied = True
+            if is_main_process(accelerator):
+                logger.info(
+                    f"[Unfreeze] epoch={epoch} activated delayed unfreeze "
+                    f"(after_epoch={args.unfreeze_after_epoch}, new_params={newly_added})"
+                )
+
         tr_loss, global_step = train_one_epoch(
             accelerator,
             model,
